@@ -1,30 +1,12 @@
 ```
 # PostgresQl Database Backup and Restore Script
-
+```
 This repository provides a script for managing PostgreSQL database backups and restores, along with other utility commands to manage the environment.
-
-## Repository Files
-
-- `README.md`: Documentation for the repository.
-- `setup_and_run.sh`: Script to set up and run the backup and restore operations.
-- `run.sh`: Script to run the backup and restore operations after cloning the repository.
-- `run.py`: Python script that handles the backup and restore operations.
-- `requirements.txt`: List of Python dependencies.
-- `.env.example`: Example configuration file for environment variables.
-- `backup.py`: Python script for backup operations.
-- `restore.py`: Python script for restore operations.
-- `storage.py`: Python script for storage operations.
-
+ ```
 ## Environment Configuration
-
-The script can work only with a local storage driver if a `.env` file is not present. The following environment variables are mandatory in this case:
-
-- `DB_HOST`: Hostname or IP address of the database server (e.g., `localhost`).
-- `DB_PORT`: Port number for the database (e.g., `5432` for PostgreSQL).
-- `DB_USER`: Username to connect to the database.
-- `DB_PASSWORD`: Password for the database user.
-- `BACKUP_DIR`: Directory where backups will be stored.
-- `KEEP_BACKUP_COUNT`: Number of backup files to retain in the backup directory.
+```
+The script can work only with a local storage driver if a `.env` file is not present 
+ 
 
 To configure the database connection, backup settings, and storage providers, create a `.env` file in the same directory as the scripts with the following format:
 
@@ -82,8 +64,8 @@ sudo curl -sSL https://raw.githubusercontent.com/a-mourad/postgres-backup/main/s
 
 ```
 curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash backup
-curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash backup --host localhost --port 5432 --user db_user --password secret
-curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash restore mydb --host localhost --user root
+curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash backup --host localhost --port 5432 --user db_user --password secret --dir /path/to/directory/
+curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash restore mydb --host localhost --user root --dir /path/to/directory/
 curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash clean
 curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash reset
 
