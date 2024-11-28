@@ -7,8 +7,9 @@ This repository provides a script for managing postgresql database backups and r
 
 Environment Configuration
 -------------------------
+The script can work only with local storage driver if .env file is not present (  --host localhost --port 5432 --user db_user --password secret ) are mandatory in this case
 
-The script relies on a `.env` file to configure the database connection, backup settings, and storage providers. This file must be located in the same directory as the script.
+Otherwise a `.env` file to configure the database connection, backup settings, and storage providers. This file must be located in the same directory as the script.
 
 Here is a sample `.env` file:
  
