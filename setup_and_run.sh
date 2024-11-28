@@ -51,18 +51,22 @@ cd "$REPO_DIR" || { echo "Failed to change directory to $REPO_DIR"; exit 1; }
 
 # Pull latest changes
 echo "Pulling latest changes..."
-git pull origin main || { echo "Failed to pull latest changes"; }
+git pull origin main || { echo "Failed to pull latest changes"; exit 1; }
 
 # Copy .env if exists
 if [ -f "../.env" ]; then
-    cp ../.env . || { echo "Failed to copy .env file"; }
+    cp ../.env . || { echo "Failed to copy .env file"; exit 1; }
 fi
 
 # Setup virtual environment
-echo "Setting up virtual environment..."
-python3 -m venv venv || { echo "Failed to create virtual environment"; exit 1; }
-source venv/bin/activate || { echo "Failed to activate virtual environment"; exit 1; }
-pip install -r requirements.txt || { echo "Failed to install requirements"; exit 1; }
+VENV_DIR="venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Setting up virtual environment..."
+    python3 -m venv "$VENV_DIR" || { echo "Failed to create virtual environment"; exit 1; }
+    source "$VENV_DIR/bin/activate" || { echo "Failed to activate virtual environment"; exit 1; }
+    pip install -r requirements.txt || { echo "Failed to install requirements"; exit 1; }
+fi
+
 
 # Function to extract database parameters
 get_db_params() {

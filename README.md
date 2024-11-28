@@ -66,7 +66,7 @@ Setup and Usage
 You can run the setup and run the script directly using `curl`:
 
 ```
-curl https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash [command] [options]
+sudo curl -sSL https://raw.githubusercontent.com/a-mourad/postgres-backup/main/setup_and_run.sh | bash [command] [options]
 
 ```
 
