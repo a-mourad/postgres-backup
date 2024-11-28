@@ -1,0 +1,12 @@
+# Ignore IntelliJ IDEA project files
+.idea/
+
+# Specific files inside .idea to ignore
+.idea/backup-restore.iml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+
+
