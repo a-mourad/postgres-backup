@@ -53,8 +53,9 @@ class Restore:
     def load_storage_providers(self):
         providers = []
 
-        # Always include local storage
-        providers.append(LocalStorage(self.backup_dir))
+        # do not Always include local storage
+        if os.getenv('LOCAL_ENABLED', 'false').lower() == 'true':
+            providers.append(LocalStorage(self.backup_dir))
         # Minio
         if os.getenv('MINIO_ENABLED', 'false').lower() == 'true':
             try:
