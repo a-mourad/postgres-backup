@@ -1,112 +1,116 @@
 #!/bin/bash
-# run.sh
 
-# Make sure Python 3 is installed
-if ! command -v python3 &> /dev/null; then
-    echo "Python 3 is required but not installed. Please install Python 3 first."
-    echo "sudo apt install python3.12 python3.12-venv"
+# PostgreSQL Backup Setup and Launcher Script
+# Checks Python3, creates virtual environment, installs dependencies, and runs backup script
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to display error and exit
+error_exit() {
+    echo -e "${RED}ERROR: $1${NC}" >&2
     exit 1
-fi
-
-# Function to display usage
-show_usage() {
-    echo "Usage: ./run.sh [command] [options]"
-    echo ""
-    echo "Commands:"
-    echo "  backup              Run backup script"
-    echo "  restore DB_NAME     Restore specific database"
-    echo "  clean              Remove virtual environment and cache"
-    echo "  reset              Reset virtual environment and reinstall requirements"
-    echo ""
-    echo "Options:"
-    echo "  --host HOST        Database host"
-    echo "  --port PORT        Database port"
-    echo "  --user USER        Database user"
-    echo "  --password PASS    Database password"
-    echo ""
-    echo "Examples:"
-    echo "  ./run.sh backup"
-    echo "  ./run.sh backup --host localhost --port 5432 --user root --password secret"
-    echo "  ./run.sh restore mydb --host localhost --user root"
-    echo "  ./run.sh clean"
-    echo "  ./run.sh reset"
 }
-# Check if any command is provided
-if [ $# -eq 0 ]; then
-    show_usage
-    exit 1
-fi
 
+# Function to display info message
+info() {
+    echo -e "${GREEN}INFO: $1${NC}"
+}
 
-# Determine the script's directory
-script_dir="$(dirname "$(readlink -f "$0")")"
+# Check Python3 installation
+check_python() {
+    if ! command -v python3 &> /dev/null; then
+        error_exit "Python3 is not installed. Please install Python 3.7 or higher."
+    fi
 
-# Change to the script's directory
-cd "$script_dir"
-get_db_params() {
-    DB_PARAMS=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --host|--port|--user|--password|--dir)
-                if [ -n "$2" ]; then
-                    DB_PARAMS="$DB_PARAMS $1 $2"
-                    shift 2
-                else
-                    echo "Error: Missing value for parameter $1"
-                    exit 1
-                fi
-                ;;
-            *)
-                shift
-                ;;
-        esac
+    # Get Python version using Python's built-in version info
+    PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+
+    if [[ -z "$PYTHON_VERSION" ]]; then
+        error_exit "Unable to determine Python version"
+    fi
+
+    # Split version into major and minor
+    IFS='.' read -r MAJOR MINOR <<< "$PYTHON_VERSION"
+
+    # Check if version is at least 3.7
+    if [[ "$MAJOR" -lt 3 ]] || [[ "$MAJOR" -eq 3 && "$MINOR" -lt 7 ]]; then
+        error_exit "Python 3.7+ is required. Current version: $PYTHON_VERSION"
+    fi
+
+    info "Python $PYTHON_VERSION detected ✓"
+}
+
+# Setup virtual environment
+setup_venv() {
+    local VENV_PATH="./pg_backup_venv"
+
+    # Check if venv is already installed
+    if ! python3 -m venv --help &> /dev/null; then
+        error_exit "Python venv module not found. Install python3-venv package."
+    fi
+
+    # Create virtual environment
+    if [[ ! -d "$VENV_PATH" ]]; then
+        info "Creating virtual environment..."
+        python3 -m venv "$VENV_PATH" || error_exit "Failed to create virtual environment"
+    fi
+
+    # Activate virtual environment
+    source "$VENV_PATH/bin/activate" || error_exit "Failed to activate virtual environment"
+
+    info "Virtual environment activated ✓"
+}
+
+# Install required dependencies
+install_dependencies() {
+    info "Installing required dependencies..."
+
+    pip install --upgrade pip || error_exit "Failed to upgrade pip"
+
+    # List of required Python packages
+    DEPENDENCIES=(
+        "psycopg2-binary"
+        "boto3"
+        "minio"
+        "google-cloud-storage"
+    )
+
+    for dep in "${DEPENDENCIES[@]}"; do
+        pip install "$dep" || error_exit "Failed to install $dep"
     done
-    echo "$DB_PARAMS"
+
+    info "All dependencies installed successfully ✓"
 }
-# Check if the command is backup, clean, reset, restore, or help
-# Get the command
-COMMAND="$1"
-shift
 
-# Process commands with their parameters
-case "$COMMAND" in
-    backup)
-        # Extract database parameters and pass them to the Python script
-        DB_PARAMS=$(get_db_params "$@")
-        python3 run.py backup $DB_PARAMS
-        ;;
-    restore)
-        if [ $# -lt 1 ]; then
-            echo "Error: Database name is required for restore command"
-            echo "Usage: ./run.sh restore <database_name> [options]"
-            exit 1
-        fi
-        DB_NAME="$1"
-        shift
-        # Extract database parameters and pass them along with the database name
-        DB_PARAMS=$(get_db_params "$@")
-        python3 run.py restore "$DB_NAME" $DB_PARAMS
-        ;;
-    clean)
-        python3 run.py clean
-        ;;
-    reset)
-        python3 run.py reset
-        ;;
-    --help|-h)
-        show_usage
-        ;;
-    *)
-        echo "Error: Unknown command '$COMMAND'"
-        show_usage
-        exit 1
-        ;;
-esac
+# Main script execution
+main() {
 
-# Check if the command was successful
-if [ $? -eq 0 ]; then
-    echo "Command completed successfully"
-else
-    echo "Command failed with error code $?"
-    exit 1
-fi
+
+    # Perform checks and setup
+    check_python
+    setup_venv
+    install_dependencies
+
+    # Path to the backup script (adjust if needed)
+    BACKUP_SCRIPT="./backup_script.py"
+
+    # Check if backup script exists
+    if [[ ! -f "$BACKUP_SCRIPT" ]]; then
+        error_exit "Backup script not found at $BACKUP_SCRIPT"
+    fi
+
+    info "Launching PostgreSQL Backup Script..."
+
+    # Pass all arguments to the Python script
+    python3 "$BACKUP_SCRIPT" "$@"
+
+    # Deactivate virtual environment
+    deactivate
+}
+
+# Run main function with all script arguments
+main "$@"

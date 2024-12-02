@@ -1,0 +1,51 @@
+2024-12-02 15:53:49,822 - ERROR: Backup for template0 failed: Command '['pg_dump', '-hlocalhost', '-p5432', '-Uodoo', '-f', '/home/mourad/Documents/GitHub/backup-restore/backups/template0/2024-12-02_15-53-49/template0_dump.sql', 'template0']' returned non-zero exit status 1.
+2024-12-02 15:53:49,857 - ERROR: Backup for  failed: Command '['pg_dump', '-hlocalhost', '-p5432', '-Uodoo', '-f', '/home/mourad/Documents/GitHub/backup-restore/backups/2024-12-02_15-53-49/_dump.sql', '']' returned non-zero exit status 1.
+2024-12-02 15:53:50,021 - ERROR: Backup for  failed: Command '['pg_dump', '-hlocalhost', '-p5432', '-Uodoo', '-f', '/home/mourad/Documents/GitHub/backup-restore/backups/2024-12-02_15-53-49/_dump.sql', '']' returned non-zero exit status 1.
+2024-12-02 15:57:40,057 - INFO: Found databases: []
+2024-12-02 16:00:37,592 - INFO: Found databases: []
+2024-12-02 16:00:55,116 - INFO: Found databases: []
+2024-12-02 16:13:33,890 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:13:33,928 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:13:34,937 - INFO: Successfully backed up database test
+2024-12-02 16:13:35,430 - INFO: Successfully backed up database mourad
+2024-12-02 16:14:10,309 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:14:10,348 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:14:11,160 - INFO: Successfully backed up database test
+2024-12-02 16:14:11,554 - INFO: Successfully backed up database mourad
+2024-12-02 16:19:03,970 - INFO: Successfully restored database mourad
+2024-12-02 16:20:18,476 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:20:18,514 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:20:19,349 - INFO: Successfully backed up database test
+2024-12-02 16:20:19,755 - INFO: Successfully backed up database mourad
+2024-12-02 16:20:51,464 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:20:51,501 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:20:52,341 - INFO: Successfully backed up database test
+2024-12-02 16:20:52,771 - INFO: Successfully backed up database mourad
+2024-12-02 16:25:14,371 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:25:14,408 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:25:15,284 - INFO: Successfully backed up database test
+2024-12-02 16:25:15,693 - INFO: Successfully backed up database mourad
+2024-12-02 16:27:54,922 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:27:54,959 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:27:55,805 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/test/test_2024-12-02_16-27-54_backup.tar.gz to minio
+2024-12-02 16:27:55,805 - INFO: Successfully backed up database test
+2024-12-02 16:27:56,229 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/mourad/mourad_2024-12-02_16-27-55_backup.tar.gz to minio
+2024-12-02 16:27:56,229 - INFO: Successfully backed up database mourad
+2024-12-02 16:33:51,693 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:33:51,731 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:33:52,572 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/test/test_2024-12-02_16-33-51_backup.tar.gz to minio
+2024-12-02 16:33:52,572 - INFO: Successfully backed up database test
+2024-12-02 16:33:52,975 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/mourad/mourad_2024-12-02_16-33-52_backup.tar.gz to minio
+2024-12-02 16:33:52,975 - INFO: Successfully backed up database mourad
+2024-12-02 16:35:08,324 - ERROR: Database restoration failed: list index out of range
+2024-12-02 16:38:10,588 - ERROR: Database restoration failed: list index out of range
+2024-12-02 16:40:36,214 - ERROR: Database restoration failed: No backups found in directory /home/mourad/Documents/GitHub/backup-restore/backups/mourad
+2024-12-02 16:41:37,029 - ERROR: Database restoration failed: No backups found in directory /home/mourad/Documents/GitHub/backup-restore/backups/mourad
+2024-12-02 16:43:59,743 - INFO: Executing command: psql -hlocalhost -p5432 -Uodoo -d postgres -t -A -c SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1');
+2024-12-02 16:43:59,782 - INFO: Found databases: ['test', 'mourad']
+2024-12-02 16:44:00,606 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/test/test_2024-12-02_16-43-59_backup.tar.gz to minio
+2024-12-02 16:44:00,606 - INFO: Successfully backed up database test
+2024-12-02 16:44:01,035 - INFO: Uploaded /home/mourad/Documents/GitHub/backup-restore/backups/mourad/mourad_2024-12-02_16-44-00_backup.tar.gz to minio
+2024-12-02 16:44:01,035 - INFO: Successfully backed up database mourad
+2024-12-02 16:44:22,038 - INFO: Successfully restored database mourad
+2024-12-02 16:44:37,185 - INFO: Successfully restored database test

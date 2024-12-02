@@ -8,5 +8,7 @@
 .idea/misc.xml
 .idea/modules.xml
 .idea/vcs.xml
+backups
+pg_backup_venv
 
 
