@@ -89,7 +89,9 @@ install_dependencies() {
 # Main script execution
 main() {
 
-
+    # Get the directory where the script is located
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    cd "$SCRIPT_DIR" || error_exit "Failed to change to script directory"
     # Perform checks and setup
     check_python
     setup_venv
