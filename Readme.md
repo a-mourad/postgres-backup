@@ -1,12 +1,20 @@
 Usage Instructions
 
 
+ 
 
-sudo bash run.sh --action backup --username=odoo --password=odoo17@2023 --include-folders /home/mourad/Desktop/projects/taplio/background.js      --storage-type minio     --storage-endpoint localhost:9002     --storage-access-key Jx9gTJLXPv8slwT6AX6q     --storage-secret-key t5UzFbzszEDipmn6rnaJPoJbgXPDEC3zecmJaIQJ     --storage-bucket test
-
-sudo bash run.sh --action restore --database mourad  --username=odoo --password=odoo17@2023 
-
-
+sudo ./run.sh --action backup \
+--include-folders /path/to/folders/to/backup \
+--backup-dir=/path/to/floder/to/store/backups/locally \ 
+--host localhost \
+--port 5432 \
+--username db_username \
+--password db_password \
+--storage-type minio \
+--storage-endpoint minio-ip:port \
+--storage-access-key access_key \
+--storage-secret-key secret \
+--storage-bucket bucket 
 
 Save the script as setup.sh
 Make it executable:
