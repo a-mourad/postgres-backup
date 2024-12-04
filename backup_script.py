@@ -342,7 +342,7 @@ def main():
     parser.add_argument('--database', help='Specific database name')
     parser.add_argument('--backup-file', help='Specific backup file for restoration')
     parser.add_argument('--include-folders', nargs='+', help='Folders to include in backup')
-    parser.add_argument('--backup_dir', nargs='+',default='/tmp/postgres-backups' help='Folder where backups are going to be stored')
+    parser.add_argument('--backup-dir', nargs='+',default='/tmp/postgres-backups' help='Folder where backups are going to be stored')
 
     # Database connection arguments
     parser.add_argument('--host', default='localhost', help='PostgreSQL server host')
