@@ -3,6 +3,16 @@
 # PostgreSQL Backup Setup and Launcher Script
 # Checks Python3, creates virtual environment, installs dependencies, and runs backup script
 
+# Ensure script is run with sudo or as root to perform system package installations
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run with sudo or as root to install system packages."
+   exit 1
+fi
+
+# System Package Installation
+apt update || { echo "Failed to update package lists"; exit 1; }
+apt install -y python3-venv postgresql-client || { echo "Failed to install required system packages"; exit 1; }
+
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,10 +98,10 @@ install_dependencies() {
 
 # Main script execution
 main() {
-
     # Get the directory where the script is located
     SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
     cd "$SCRIPT_DIR" || error_exit "Failed to change to script directory"
+
     # Perform checks and setup
     check_python
     setup_venv
