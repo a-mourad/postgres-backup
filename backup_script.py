@@ -242,11 +242,68 @@ class DatabaseBackupManager:
         except Exception as e:
             self.logger.error(f"Cloud storage upload failed: {e}")
 
+    def restore_filestore(
+            self,
+            backup_file: str,
+            target_filestore_path: str,
+            remove_existing: bool = True
+    ) -> bool:
+        """
+        Restore filestore from backup archive.
+
+        Args:
+            backup_file (str): Path to the backup archive
+            target_filestore_path (str): Target path for filestore restoration
+            remove_existing (bool): Whether to remove existing filestore before restore
+        """
+        try:
+            # Remove existing filestore if requested
+            if remove_existing and os.path.exists(target_filestore_path):
+                self.logger.info(f"Removing existing filestore at {target_filestore_path}")
+                shutil.rmtree(target_filestore_path)
+
+            # Create target directory
+            os.makedirs(os.path.dirname(target_filestore_path), exist_ok=True)
+
+            # Extract filestore from backup
+            with tarfile.open(backup_file, 'r:gz') as tar:
+                # Find filestore backup in the archive
+                filestore_members = [member for member in tar.getmembers() 
+                                   if 'filestore_backup.tar.gz' in member.name]
+                
+                if not filestore_members:
+                    self.logger.warning("No filestore backup found in archive")
+                    return False
+
+                # Extract filestore backup
+                filestore_backup = tar.extractfile(filestore_members[0])
+                if filestore_backup:
+                    # Extract filestore to target location
+                    with tarfile.open(fileobj=filestore_backup, mode='r:gz') as filestore_tar:
+                        filestore_tar.extractall(os.path.dirname(target_filestore_path))
+                        
+                        # Move extracted filestore to target path
+                        extracted_path = os.path.join(os.path.dirname(target_filestore_path), 'filestore')
+                        if os.path.exists(extracted_path):
+                            if os.path.exists(target_filestore_path):
+                                shutil.rmtree(target_filestore_path)
+                            shutil.move(extracted_path, target_filestore_path)
+                            self.logger.info(f"Successfully restored filestore to {target_filestore_path}")
+                            return True
+
+            return False
+
+        except Exception as e:
+            self.logger.error(f"Filestore restoration failed: {e}")
+            return False
+
     def restore_database(
             self,
             database: str,
             backup_file: Optional[str] = None,
-            drop_existing: bool = True
+            drop_existing: bool = True,
+            restore_filestore: bool = False,
+            filestore_path: Optional[str] = None
     ) -> bool:
         """
         Restore a database from a specific backup or latest backup.
@@ -255,6 +312,8 @@ class DatabaseBackupManager:
             database (str): Target database name
             backup_file (str, optional): Specific backup file to restore
             drop_existing (bool): Whether to drop existing database before restore
+            restore_filestore (bool): Whether to restore filestore along with database
+            filestore_path (str, optional): Target path for filestore restoration
         """
         try:
             if not backup_file:
@@ -327,6 +386,69 @@ class DatabaseBackupManager:
                 return False
 
             self.logger.info(f"Successfully restored database {database}")
+
+            # Restore filestore if requested
+            if restore_filestore:
+                # Auto-detect filestore path if not provided
+                if not filestore_path:
+                    # Try to detect from backup archive
+                    backup_archive = None
+                    if backup_file:
+                        backup_dir = os.path.dirname(backup_file)
+                        for file in os.listdir(backup_dir):
+                            if file.endswith('_backup.tar.gz'):
+                                backup_archive = os.path.join(backup_dir, file)
+                                break
+                    else:
+                        backup_dir = os.path.join(self.backup_dir, database)
+                        if os.path.exists(backup_dir):
+                            archives = [f for f in os.listdir(backup_dir) if f.endswith('_backup.tar.gz')]
+                            if archives:
+                                backup_archive = os.path.join(backup_dir, sorted(archives)[-1])
+                    
+                    if backup_archive:
+                        # Try to extract and detect filestore path from backup
+                        try:
+                            with tarfile.open(backup_archive, 'r:gz') as tar:
+                                # Look for filestore backup in the archive
+                                filestore_members = [member for member in tar.getmembers() 
+                                                   if 'filestore_backup.tar.gz' in member.name]
+                                if filestore_members:
+                                    # Use the provided filestore_path or default
+                                    if not filestore_path:
+                                        filestore_path = f"/home/ubuntu/projects/{database}/filestore"
+                                    self.logger.info(f"Using filestore path: {filestore_path}")
+                        except Exception as e:
+                            self.logger.warning(f"Could not detect filestore in backup: {e}")
+                
+                if filestore_path:
+                    # Find the backup archive for filestore restoration
+                    backup_archive = None
+                    if backup_file:
+                        # If specific backup file provided, look for the archive
+                        backup_dir = os.path.dirname(backup_file)
+                        for file in os.listdir(backup_dir):
+                            if file.endswith('_backup.tar.gz'):
+                                backup_archive = os.path.join(backup_dir, file)
+                                break
+                    else:
+                        # Find latest backup archive
+                        backup_dir = os.path.join(self.backup_dir, database)
+                        if os.path.exists(backup_dir):
+                            archives = [f for f in os.listdir(backup_dir) if f.endswith('_backup.tar.gz')]
+                            if archives:
+                                backup_archive = os.path.join(backup_dir, sorted(archives)[-1])
+
+                    if backup_archive and os.path.exists(backup_archive):
+                        self.logger.info(f"Restoring filestore from {backup_archive}")
+                        filestore_success = self.restore_filestore(backup_archive, filestore_path)
+                        if not filestore_success:
+                            self.logger.warning("Filestore restoration failed, but database was restored successfully")
+                    else:
+                        self.logger.warning("No backup archive found for filestore restoration")
+                else:
+                    self.logger.warning("No filestore path specified and could not auto-detect")
+
             return True
 
         except Exception as e:
@@ -343,6 +465,9 @@ def main():
     parser.add_argument('--backup-file', help='Specific backup file for restoration')
     parser.add_argument('--include-folders', nargs='+', help='Folders to include in backup')
     parser.add_argument('--backup-dir', default='/tmp/postgres-backups', help='Folder where backups are going to be stored')
+    parser.add_argument('--skip-filestore', action='store_true', help='Skip filestore restoration (restore database only)')
+    parser.add_argument('--project-path', help='Project root path where filestore will be restored (defaults to /home/ubuntu/projects/{database})')
+    parser.add_argument('--filestore-path', help='Custom filestore path (overrides project-path)')
 
     # Database connection arguments
     parser.add_argument('--host', default='localhost', help='PostgreSQL server host')
@@ -404,7 +529,34 @@ def main():
             print("Error: Database name is required for restoration.")
             sys.exit(1)
 
-        success = backup_manager.restore_database(args.database, args.backup_file,drop_existing=args.drop_existing)
+        # For restore operations, we only need local storage
+        # Cloud storage parameters are ignored during restore
+        restore_manager = DatabaseBackupManager(
+            host=args.host,
+            port=args.port,
+            username=args.username,
+            password=args.password,
+            backup_dir=args.backup_dir,
+            storage_type='local',  # Force local storage for restore
+            storage_config={}
+        )
+
+        # Determine filestore path
+        filestore_path = args.filestore_path
+        if not filestore_path and not args.skip_filestore:
+            # Use project-path if provided, otherwise default to /home/ubuntu/projects/{database}
+            if args.project_path:
+                filestore_path = os.path.join(args.project_path, 'filestore')
+            else:
+                filestore_path = f"/home/ubuntu/projects/{args.database}/filestore"
+
+        success = restore_manager.restore_database(
+            args.database, 
+            args.backup_file,
+            drop_existing=args.drop_existing,
+            restore_filestore=not args.skip_filestore,  # Default to True unless --skip-filestore is passed
+            filestore_path=filestore_path
+        )
         sys.exit(0 if success else 1)
 
 
