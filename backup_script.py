@@ -79,6 +79,9 @@ class DatabaseBackupManager:
 
         # Create backup directory if not exists
         os.makedirs(self.backup_dir, exist_ok=True)
+        
+        # Test database connection
+        self._test_database_connection()
 
     def _initialize_storage_client(self):
         """Initialize cloud storage client based on configuration."""
@@ -104,6 +107,39 @@ class DatabaseBackupManager:
         except Exception as e:
             self.logger.error(f"Storage client initialization failed: {e}")
             return None
+
+    def _test_database_connection(self):
+        """Test database connection before proceeding with operations."""
+        try:
+            test_cmd = [
+                'psql',
+                f'-h{self.host}',
+                f'-p{self.port}',
+                f'-U{self.username}',
+                'postgres',
+                '-c', 'SELECT version();'
+            ]
+            
+            result = subprocess.run(
+                test_cmd,
+                env={**os.environ, 'PGPASSWORD': self.password},
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                self.logger.info("Database connection test successful")
+            else:
+                self.logger.error(f"Database connection test failed: {result.stderr}")
+                raise Exception(f"Database connection failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("Database connection test timed out")
+            raise Exception("Database connection timed out")
+        except Exception as e:
+            self.logger.error(f"Database connection test error: {e}")
+            raise
 
     def list_databases(self) -> List[str]:
         """
@@ -319,20 +355,83 @@ class DatabaseBackupManager:
             if not backup_file:
                 # Find latest backup
                 backup_dir = os.path.join(self.backup_dir, database)
-                print("dir", backup_dir)
-                backups = sorted([
-                    os.path.join(backup_dir, d)
-                    for d in os.listdir(backup_dir)
-                    if os.path.isdir(os.path.join(backup_dir, d))
-                ], reverse=True)
-                print("backups",backups)
-                if not backups:
-                    raise FileNotFoundError(f"No backups found in directory {backup_dir}")
-                backup_file = os.path.join(backups[0], f'{database}_dump.sql')
+                self.logger.info(f"Looking for backups in: {backup_dir}")
+                
+                if not os.path.exists(backup_dir):
+                    raise FileNotFoundError(f"Backup directory does not exist: {backup_dir}")
+                
+                # First, try to find timestamp folders (newer backup format)
+                timestamp_folders = []
+                for item in os.listdir(backup_dir):
+                    item_path = os.path.join(backup_dir, item)
+                    if os.path.isdir(item_path) and item.count('_') == 2:  # Format: YYYY-MM-DD_HH-MM-SS
+                        timestamp_folders.append(item_path)
+                
+                if timestamp_folders:
+                    # Sort by timestamp (newest first)
+                    timestamp_folders.sort(reverse=True)
+                    latest_folder = timestamp_folders[0]
+                    backup_file = os.path.join(latest_folder, f'{database}_dump.sql')
+                    self.logger.info(f"Found timestamp folder backup: {backup_file}")
+                    
+                    if not os.path.exists(backup_file):
+                        self.logger.warning(f"Database dump not found in timestamp folder: {backup_file}")
+                        # Fall back to archive files
+                        backup_file = None
+                
+                # If no timestamp folders or dump file not found, try archive files
+                if not backup_file:
+                    self.logger.info("Looking for archive files...")
+                    archive_files = []
+                    for item in os.listdir(backup_dir):
+                        if item.endswith('_backup.tar.gz'):
+                            archive_files.append(os.path.join(backup_dir, item))
+                    
+                    if archive_files:
+                        # Sort by modification time (newest first)
+                        archive_files.sort(key=os.path.getmtime, reverse=True)
+                        latest_archive = archive_files[0]
+                        self.logger.info(f"Found latest archive: {latest_archive}")
+                        
+                        # Extract the database dump from the archive
+                        try:
+                            with tarfile.open(latest_archive, 'r:gz') as tar:
+                                # Find the database dump file in the archive
+                                dump_members = [member for member in tar.getmembers() 
+                                              if member.name.endswith(f'{database}_dump.sql')]
+                                
+                                if dump_members:
+                                    # Extract to a temporary location
+                                    temp_dir = os.path.join(self.backup_dir, 'temp_extract')
+                                    os.makedirs(temp_dir, exist_ok=True)
+                                    tar.extractall(temp_dir)
+                                    
+                                    # Find the extracted dump file
+                                    for root, dirs, files in os.walk(temp_dir):
+                                        for file in files:
+                                            if file == f'{database}_dump.sql':
+                                                backup_file = os.path.join(root, file)
+                                                self.logger.info(f"Extracted database dump: {backup_file}")
+                                                break
+                                        if backup_file:
+                                            break
+                                else:
+                                    self.logger.error(f"No database dump found in archive: {latest_archive}")
+                                    raise FileNotFoundError(f"No database dump found in archive: {latest_archive}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to extract database dump from archive: {e}")
+                            raise
+                    else:
+                        raise FileNotFoundError(f"No backups found in directory {backup_dir}")
+                
+                if not backup_file or not os.path.exists(backup_file):
+                    raise FileNotFoundError(f"Database dump file not found: {backup_file}")
+                
+                self.logger.info(f"Using backup file: {backup_file}")
 
             if drop_existing:
                 # Drop existing database
-                self.logger.info(f"Dropping existing database {database}")
+                self.logger.info(f"Attempting to drop existing database {database}")
                 drop_cmd = [
                     'psql',
                     f'-h{self.host}',
@@ -341,14 +440,34 @@ class DatabaseBackupManager:
                     'postgres',  # Connect to postgres database to drop the target
                     '-c', f'DROP DATABASE IF EXISTS "{database}"'
                 ]
-                subprocess.run(
-                    drop_cmd,
-                    env={**os.environ, 'PGPASSWORD': self.password},
-                    check=True,
-                    capture_output=True
-                )
+                
+                try:
+                    result = subprocess.run(
+                        drop_cmd,
+                        env={**os.environ, 'PGPASSWORD': self.password},
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0:
+                        self.logger.info(f"Successfully dropped database {database}")
+                    else:
+                        self.logger.warning(f"Database drop command returned non-zero exit code: {result.returncode}")
+                        self.logger.warning(f"STDERR: {result.stderr}")
+                        # Continue with restore even if drop failed (database might not exist)
+                        self.logger.info("Continuing with restore...")
+                        
+                except subprocess.TimeoutExpired:
+                    self.logger.error("Database drop command timed out")
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Error dropping database: {e}")
+                    # Continue with restore even if drop failed
+                    self.logger.info("Continuing with restore...")
 
                 # Create fresh database
+                self.logger.info(f"Creating fresh database {database}")
                 create_cmd = [
                     'psql',
                     f'-h{self.host}',
@@ -357,14 +476,32 @@ class DatabaseBackupManager:
                     'postgres',
                     '-c', f'CREATE DATABASE "{database}"'
                 ]
-                subprocess.run(
-                    create_cmd,
-                    env={**os.environ, 'PGPASSWORD': self.password},
-                    check=True,
-                    capture_output=True
-                )
+                
+                try:
+                    result = subprocess.run(
+                        create_cmd,
+                        env={**os.environ, 'PGPASSWORD': self.password},
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0:
+                        self.logger.info(f"Successfully created database {database}")
+                    else:
+                        self.logger.error(f"Database creation failed with exit code: {result.returncode}")
+                        self.logger.error(f"STDERR: {result.stderr}")
+                        raise Exception(f"Failed to create database: {result.stderr}")
+                        
+                except subprocess.TimeoutExpired:
+                    self.logger.error("Database creation command timed out")
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Error creating database: {e}")
+                    raise
 
             # Restore database
+            self.logger.info(f"Starting database restore from: {backup_file}")
             restore_cmd = [
                 'psql',
                 f'-h{self.host}',
@@ -374,18 +511,29 @@ class DatabaseBackupManager:
                 '-f', backup_file
             ]
 
-            result = subprocess.run(
-                restore_cmd,
-                env={**os.environ, 'PGPASSWORD': self.password},
-                capture_output=True,
-                text=True
-            )
+            try:
+                result = subprocess.run(
+                    restore_cmd,
+                    env={**os.environ, 'PGPASSWORD': self.password},
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minutes timeout for restore
+                )
 
-            if result.returncode != 0:
-                self.logger.error(f"Restore failed: {result.stderr}")
+                if result.returncode == 0:
+                    self.logger.info(f"Successfully restored database {database}")
+                else:
+                    self.logger.error(f"Database restore failed with exit code: {result.returncode}")
+                    self.logger.error(f"STDERR: {result.stderr}")
+                    self.logger.error(f"STDOUT: {result.stdout}")
+                    return False
+                    
+            except subprocess.TimeoutExpired:
+                self.logger.error("Database restore command timed out")
                 return False
-
-            self.logger.info(f"Successfully restored database {database}")
+            except Exception as e:
+                self.logger.error(f"Error during database restore: {e}")
+                return False
 
             # Restore filestore if requested
             if restore_filestore:
@@ -454,6 +602,15 @@ class DatabaseBackupManager:
         except Exception as e:
             self.logger.error(f"Database restoration failed: {e}")
             return False
+        finally:
+            # Cleanup temporary extraction directory
+            temp_dir = os.path.join(self.backup_dir, 'temp_extract')
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    self.logger.info("Cleaned up temporary extraction directory")
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup temporary directory: {e}")
 
 
 def main():

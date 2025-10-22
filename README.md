@@ -10,6 +10,8 @@ A comprehensive PostgreSQL database backup and restore utility with cloud storag
 - **Flexible Restore**: Database and filestore restoration with conflict resolution
 - **Automated Setup**: Virtual environment and dependency management
 - **Comprehensive Logging**: Detailed operation logs and error handling
+- **Smart Backup Selection**: Automatically finds latest backup from timestamp folders or archives
+- **Robust Error Handling**: Connection testing, timeout management, and graceful failure recovery
 - **Cross-Platform**: Works on Linux, macOS, and Windows
 
 ## 📋 Prerequisites
