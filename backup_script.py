@@ -455,8 +455,61 @@ class DatabaseBackupManager:
                     else:
                         self.logger.warning(f"Database drop command returned non-zero exit code: {result.returncode}")
                         self.logger.warning(f"STDERR: {result.stderr}")
-                        # Continue with restore even if drop failed (database might not exist)
-                        self.logger.info("Continuing with restore...")
+                        
+                        # Check if database is being accessed by other users
+                        if "is being accessed by other users" in result.stderr:
+                            self.logger.warning("Database is being accessed by other users. Attempting to terminate connections...")
+                            
+                            # Terminate all connections to the database
+                            terminate_cmd = [
+                                'psql',
+                                f'-h{self.host}',
+                                f'-p{self.port}',
+                                f'-U{self.username}',
+                                'postgres',
+                                '-c', f"""
+                                SELECT pg_terminate_backend(pid) 
+                                FROM pg_stat_activity 
+                                WHERE datname = '{database}' AND pid <> pg_backend_pid();
+                                """
+                            ]
+                            
+                            try:
+                                terminate_result = subprocess.run(
+                                    terminate_cmd,
+                                    env={**os.environ, 'PGPASSWORD': self.password},
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30
+                                )
+                                
+                                if terminate_result.returncode == 0:
+                                    self.logger.info("Terminated existing connections to database")
+                                    
+                                    # Try to drop database again
+                                    drop_result = subprocess.run(
+                                        drop_cmd,
+                                        env={**os.environ, 'PGPASSWORD': self.password},
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=30
+                                    )
+                                    
+                                    if drop_result.returncode == 0:
+                                        self.logger.info(f"Successfully dropped database {database} after terminating connections")
+                                    else:
+                                        self.logger.warning(f"Database drop still failed after terminating connections: {drop_result.stderr}")
+                                        self.logger.info("Continuing with restore...")
+                                else:
+                                    self.logger.warning(f"Failed to terminate connections: {terminate_result.stderr}")
+                                    self.logger.info("Continuing with restore...")
+                                    
+                            except Exception as e:
+                                self.logger.warning(f"Error terminating connections: {e}")
+                                self.logger.info("Continuing with restore...")
+                        else:
+                            # Continue with restore even if drop failed (database might not exist)
+                            self.logger.info("Continuing with restore...")
                         
                 except subprocess.TimeoutExpired:
                     self.logger.error("Database drop command timed out")
@@ -466,38 +519,66 @@ class DatabaseBackupManager:
                     # Continue with restore even if drop failed
                     self.logger.info("Continuing with restore...")
 
-                # Create fresh database
-                self.logger.info(f"Creating fresh database {database}")
-                create_cmd = [
+                # Check if database already exists
+                check_cmd = [
                     'psql',
                     f'-h{self.host}',
                     f'-p{self.port}',
                     f'-U{self.username}',
                     'postgres',
-                    '-c', f'CREATE DATABASE "{database}"'
+                    '-t', '-c', f"SELECT 1 FROM pg_database WHERE datname = '{database}';"
                 ]
                 
                 try:
-                    result = subprocess.run(
-                        create_cmd,
+                    check_result = subprocess.run(
+                        check_cmd,
                         env={**os.environ, 'PGPASSWORD': self.password},
                         capture_output=True,
                         text=True,
-                        timeout=30
+                        timeout=10
                     )
                     
-                    if result.returncode == 0:
-                        self.logger.info(f"Successfully created database {database}")
+                    database_exists = check_result.stdout.strip() == '1'
+                    
+                    if database_exists:
+                        self.logger.info(f"Database {database} already exists, skipping creation")
                     else:
-                        self.logger.error(f"Database creation failed with exit code: {result.returncode}")
-                        self.logger.error(f"STDERR: {result.stderr}")
-                        raise Exception(f"Failed to create database: {result.stderr}")
+                        # Create fresh database
+                        self.logger.info(f"Creating fresh database {database}")
+                        create_cmd = [
+                            'psql',
+                            f'-h{self.host}',
+                            f'-p{self.port}',
+                            f'-U{self.username}',
+                            'postgres',
+                            '-c', f'CREATE DATABASE "{database}"'
+                        ]
                         
-                except subprocess.TimeoutExpired:
-                    self.logger.error("Database creation command timed out")
-                    raise
+                        try:
+                            result = subprocess.run(
+                                create_cmd,
+                                env={**os.environ, 'PGPASSWORD': self.password},
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            
+                            if result.returncode == 0:
+                                self.logger.info(f"Successfully created database {database}")
+                            else:
+                                self.logger.error(f"Database creation failed with exit code: {result.returncode}")
+                                self.logger.error(f"STDERR: {result.stderr}")
+                                raise Exception(f"Failed to create database: {result.stderr}")
+                                
+                        except subprocess.TimeoutExpired:
+                            self.logger.error("Database creation command timed out")
+                            raise
+                        except Exception as e:
+                            self.logger.error(f"Error creating database: {e}")
+                            raise
+                            
                 except Exception as e:
-                    self.logger.error(f"Error creating database: {e}")
+                    self.logger.error(f"Error checking database existence: {e}")
                     raise
 
             # Restore database
