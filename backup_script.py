@@ -598,7 +598,7 @@ class DatabaseBackupManager:
                     env={**os.environ, 'PGPASSWORD': self.password},
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5 minutes timeout for restore
+                    timeout=3600  # 1 hour timeout for restore (increased for large databases)
                 )
 
                 if result.returncode == 0:
