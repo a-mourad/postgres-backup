@@ -1,0 +1,1089 @@
+/**
+ * PostgreSQL Backup Manager - Frontend Application
+ */
+
+// ============================================================================
+// State Management
+// ============================================================================
+
+const state = {
+    currentTab: 'backup',
+    storageType: 'local',
+    isRunning: false,
+    ws: null,
+    fileBrowserPath: '/host',
+    modalFileBrowserPath: '/host',
+    modalTargetInput: null,
+    modalSelectDir: true,
+    selectedFile: null,
+    includeFolders: [],
+    databases: [],
+    savedConnections: [],
+    activeConnectionId: null,
+    editingConnectionId: null,
+    selectedColor: '#00D4AA'
+};
+
+// ============================================================================
+// WebSocket Connection
+// ============================================================================
+
+function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+    
+    state.ws = new WebSocket(wsUrl);
+    
+    state.ws.onopen = () => {
+        console.log('WebSocket connected');
+    };
+    
+    state.ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleWebSocketMessage(data);
+    };
+    
+    state.ws.onclose = () => {
+        console.log('WebSocket disconnected, reconnecting...');
+        setTimeout(connectWebSocket, 3000);
+    };
+    
+    state.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
+function handleWebSocketMessage(data) {
+    switch (data.type) {
+        case 'log':
+            appendLog(data.timestamp, data.message, data.level);
+            break;
+        case 'status':
+            updateStatus(data.status, data.operation);
+            break;
+        case 'pong':
+            // Connection alive
+            break;
+    }
+}
+
+// ============================================================================
+// Terminal / Logging
+// ============================================================================
+
+function appendLog(timestamp, message, level = 'info') {
+    const terminal = document.getElementById('terminalBody');
+    const welcome = terminal.querySelector('.terminal-welcome');
+    if (welcome) welcome.remove();
+    
+    const line = document.createElement('div');
+    line.className = `log-line ${level}`;
+    line.innerHTML = `
+        <span class="log-timestamp">[${timestamp}]</span>
+        <span class="log-message">${escapeHtml(message)}</span>
+    `;
+    
+    terminal.appendChild(line);
+    terminal.scrollTop = terminal.scrollHeight;
+}
+
+function clearLogs() {
+    const terminal = document.getElementById('terminalBody');
+    terminal.innerHTML = '<div class="terminal-welcome"><p>Logs cleared</p></div>';
+}
+
+function downloadLogs() {
+    const terminal = document.getElementById('terminalBody');
+    const lines = terminal.querySelectorAll('.log-line');
+    let content = '';
+    
+    lines.forEach(line => {
+        const timestamp = line.querySelector('.log-timestamp')?.textContent || '';
+        const message = line.querySelector('.log-message')?.textContent || '';
+        content += `${timestamp} ${message}\n`;
+    });
+    
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-logs-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+// ============================================================================
+// Status Management
+// ============================================================================
+
+function updateStatus(status, operation = null) {
+    const indicator = document.getElementById('statusIndicator');
+    const dot = indicator.querySelector('.status-dot');
+    const text = indicator.querySelector('.status-text');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    
+    // Remove all status classes
+    dot.className = 'status-dot';
+    
+    switch (status) {
+        case 'running':
+            dot.classList.add('running');
+            text.textContent = operation ? `${capitalize(operation)}ing...` : 'Running';
+            state.isRunning = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            break;
+        case 'completed':
+            dot.classList.add('success');
+            text.textContent = 'Completed';
+            state.isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            setTimeout(() => {
+                if (!state.isRunning) {
+                    dot.className = 'status-dot idle';
+                    text.textContent = 'Idle';
+                }
+            }, 5000);
+            break;
+        case 'error':
+        case 'cancelled':
+            dot.classList.add('error');
+            text.textContent = status === 'error' ? 'Error' : 'Cancelled';
+            state.isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            setTimeout(() => {
+                if (!state.isRunning) {
+                    dot.className = 'status-dot idle';
+                    text.textContent = 'Idle';
+                }
+            }, 5000);
+            break;
+        default:
+            dot.classList.add('idle');
+            text.textContent = 'Idle';
+            state.isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+    }
+}
+
+// ============================================================================
+// API Calls
+// ============================================================================
+
+async function testConnection() {
+    const btn = document.getElementById('testConnection');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Testing...';
+    
+    try {
+        const response = await fetch('/api/test-connection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(getConnectionConfig())
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Connection successful!', 'success');
+            if (data.version) {
+                appendLog(getCurrentTime(), `Connected: ${data.version}`, 'success');
+            }
+        } else {
+            showToast(`Connection failed: ${data.error}`, 'error');
+            appendLog(getCurrentTime(), `Connection failed: ${data.error}`, 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22,4 12,14.01 9,11.01"/>
+            </svg>
+            Test Connection
+        `;
+    }
+}
+
+async function listDatabases() {
+    const btn = document.getElementById('listDatabases');
+    btn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/list-databases', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(getConnectionConfig())
+        });
+        
+        const data = await response.json();
+        
+        if (data.success && data.databases.length > 0) {
+            state.databases = data.databases;
+            showDatabaseDropdown(data.databases);
+            showToast(`Found ${data.databases.length} database(s)`, 'success');
+        } else if (data.databases.length === 0) {
+            showToast('No user databases found', 'warning');
+        } else {
+            showToast(`Error: ${data.error}`, 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function showDatabaseDropdown(databases) {
+    const dropdown = document.getElementById('dbDropdown');
+    dropdown.innerHTML = databases.map(db => 
+        `<div class="dropdown-item" onclick="selectDatabase('${db}')">${db}</div>`
+    ).join('');
+    dropdown.classList.add('show');
+    
+    // Close on outside click
+    document.addEventListener('click', function closeDropdown(e) {
+        if (!dropdown.contains(e.target) && e.target.id !== 'listDatabases') {
+            dropdown.classList.remove('show');
+            document.removeEventListener('click', closeDropdown);
+        }
+    });
+}
+
+function selectDatabase(db) {
+    document.getElementById('backupDatabase').value = db;
+    document.getElementById('dbDropdown').classList.remove('show');
+}
+
+async function startOperation() {
+    const tab = state.currentTab;
+    let endpoint, payload;
+    
+    if (tab === 'backup') {
+        endpoint = '/api/backup';
+        const projectPath = document.getElementById('projectPath').value.trim();
+        payload = {
+            connection: getConnectionConfig(),
+            storage: getStorageConfig(),
+            database: document.getElementById('backupDatabase').value || null,
+            backup_dir: document.getElementById('backupDir').value || '/tmp/postgres-backups',
+            project_path: projectPath || null,
+            include_folders: (!projectPath && state.includeFolders.length > 0) ? state.includeFolders : null
+        };
+    } else if (tab === 'restore') {
+        const database = document.getElementById('restoreDatabase').value;
+        if (!database) {
+            showToast('Database name is required for restore', 'error');
+            return;
+        }
+        
+        const restoreType = document.querySelector('#restoreTypeControl .segment.active')?.dataset.value || 'database';
+        
+        if (restoreType === 'project') {
+            const targetProjectPath = document.getElementById('targetProjectPath').value.trim();
+            if (!targetProjectPath) {
+                showToast('Target project path is required for project restore', 'error');
+                return;
+            }
+        }
+        
+        endpoint = '/api/restore';
+        payload = {
+            connection: getConnectionConfig(),
+            database: database,
+            backup_dir: document.getElementById('restoreBackupDir').value || '/tmp/postgres-backups',
+            backup_file: document.getElementById('restoreBackupFile').value || null,
+            drop_existing: document.getElementById('dropExisting').checked,
+            restore_type: restoreType,
+            skip_filestore: document.getElementById('skipFilestore').checked,
+            filestore_path: document.getElementById('filestorePath').value || null,
+            target_project_path: restoreType === 'project' ? document.getElementById('targetProjectPath').value.trim() : null,
+            skip_database: restoreType === 'project' ? document.getElementById('skipDatabase').checked : false,
+            post_restore_commands: restoreType === 'project' ? (() => {
+                const commands = document.getElementById('postRestoreCommands').value.trim();
+                return commands ? commands.split('\n').map(c => c.trim()).filter(c => c) : null;
+            })() : null
+        };
+    } else {
+        showToast('Please select Backup or Restore tab', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast(`${capitalize(tab)} started`, 'success');
+        } else {
+            showToast(data.detail || 'Operation failed', 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+async function stopOperation() {
+    try {
+        await fetch('/api/stop', { method: 'POST' });
+        showToast('Stopping operation...', 'warning');
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+// ============================================================================
+// File Browser
+// ============================================================================
+
+async function loadFileBrowser(path = '/host', targetElement = 'fileList', pathInput = 'fileBrowserPath') {
+    const fileList = document.getElementById(targetElement);
+    fileList.innerHTML = '<div class="file-list-loading">Loading...</div>';
+    
+    try {
+        const response = await fetch(`/api/files/browse?path=${encodeURIComponent(path)}`);
+        const data = await response.json();
+        
+        if (data.success) {
+            if (pathInput === 'fileBrowserPath') {
+                state.fileBrowserPath = path;
+            } else {
+                state.modalFileBrowserPath = path;
+            }
+            
+            document.getElementById(pathInput).value = path;
+            
+            // Update back button
+            const backBtn = document.getElementById(pathInput === 'fileBrowserPath' ? 'fileBrowserBack' : 'modalBrowserBack');
+            backBtn.disabled = path === '/host' || path === '/';
+            
+            // Render file list
+            if (data.items.length === 0) {
+                fileList.innerHTML = '<div class="file-list-loading">Empty directory</div>';
+                return;
+            }
+            
+            fileList.innerHTML = data.items.map(item => `
+                <div class="file-item ${item.is_dir ? 'directory' : 'file'}" 
+                     data-path="${item.path}" 
+                     data-is-dir="${item.is_dir}"
+                     onclick="handleFileClick(this, '${targetElement}', '${pathInput}')">
+                    <svg class="file-icon ${item.is_dir ? 'folder' : ''}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        ${item.is_dir 
+                            ? '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>'
+                            : '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/>'
+                        }
+                    </svg>
+                    <span class="file-name">${item.name}</span>
+                    ${item.size !== null ? `<span class="file-meta">${formatFileSize(item.size)}</span>` : ''}
+                </div>
+            `).join('');
+        } else {
+            fileList.innerHTML = `<div class="file-list-loading">Error: ${data.error}</div>`;
+        }
+    } catch (error) {
+        fileList.innerHTML = `<div class="file-list-loading">Error: ${error.message}</div>`;
+    }
+}
+
+function handleFileClick(element, targetElement, pathInput) {
+    const path = element.dataset.path;
+    const isDir = element.dataset.isDir === 'true';
+    
+    if (isDir) {
+        loadFileBrowser(path, targetElement, pathInput);
+    } else {
+        // Select file
+        document.querySelectorAll(`#${targetElement} .file-item`).forEach(el => el.classList.remove('selected'));
+        element.classList.add('selected');
+        state.selectedFile = path;
+    }
+}
+
+function navigateBack(targetElement, pathInput) {
+    const currentPath = pathInput === 'fileBrowserPath' ? state.fileBrowserPath : state.modalFileBrowserPath;
+    const parts = currentPath.split('/').filter(p => p);
+    if (parts.length > 1) {
+        // Remove last part, but keep /host
+        parts.pop();
+        const parentPath = '/' + '/'.join(parts);
+        loadFileBrowser(parentPath, targetElement, pathInput);
+    } else {
+        // Already at /host, can't go back further
+        loadFileBrowser('/host', targetElement, pathInput);
+    }
+}
+
+async function loadBackups() {
+    const backupDir = document.getElementById('backupDir')?.value || '/tmp/postgres-backups';
+    const container = document.getElementById('backupList');
+    container.innerHTML = '<div class="backup-list-loading">Loading backups...</div>';
+    
+    try {
+        const response = await fetch(`/api/files/backups?backup_dir=${encodeURIComponent(backupDir)}`);
+        const data = await response.json();
+        
+        if (data.success && data.backups.length > 0) {
+            container.innerHTML = data.backups.map(group => `
+                <div class="backup-group">
+                    <div class="backup-group-title">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                        </svg>
+                        ${group.database}
+                    </div>
+                    ${group.backups.map(backup => `
+                        <div class="backup-item">
+                            <div class="backup-item-info">
+                                <span class="backup-item-name">${backup.file}</span>
+                                <span class="backup-item-meta">${formatFileSize(backup.size)} • ${formatDate(backup.created)}</span>
+                            </div>
+                            <div class="backup-item-actions">
+                                <button class="btn btn-sm" onclick="useBackupForRestore('${backup.path}', '${group.database}')">
+                                    Use
+                                </button>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `).join('');
+        } else {
+            container.innerHTML = '<div class="backup-list-loading">No backups found</div>';
+        }
+    } catch (error) {
+        container.innerHTML = `<div class="backup-list-loading">Error: ${error.message}</div>`;
+    }
+}
+
+function useBackupForRestore(path, database) {
+    // Switch to restore tab
+    switchTab('restore');
+    
+    // Fill in the fields
+    document.getElementById('restoreDatabase').value = database;
+    document.getElementById('restoreBackupFile').value = path;
+    
+    showToast('Backup selected for restore', 'success');
+}
+
+// ============================================================================
+// File Browser Modal
+// ============================================================================
+
+function openFileBrowser(inputId, selectDir = true) {
+    state.modalTargetInput = inputId;
+    state.modalSelectDir = selectDir;
+    state.selectedFile = null;
+    
+    document.getElementById('fileBrowserModal').classList.add('show');
+    loadFileBrowser('/host', 'modalFileList', 'modalBrowserPath');
+}
+
+function closeFileBrowserModal() {
+    document.getElementById('fileBrowserModal').classList.remove('show');
+}
+
+function changeRestoreType(type) {
+    // Update segmented control
+    const control = document.getElementById('restoreTypeControl');
+    control.querySelectorAll('.segment').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.value === type);
+    });
+    
+    // Show/hide relevant fields
+    const targetProjectPathGroup = document.getElementById('targetProjectPathGroup');
+    const postRestoreCommandsGroup = document.getElementById('postRestoreCommandsGroup');
+    const filestorePathGroup = document.getElementById('filestorePathGroup');
+    const skipFilestoreCheckbox = document.getElementById('skipFilestoreCheckbox');
+    const skipDatabaseCheckbox = document.getElementById('skipDatabaseCheckbox');
+    
+    if (type === 'project') {
+        targetProjectPathGroup.style.display = 'block';
+        postRestoreCommandsGroup.style.display = 'block';
+        filestorePathGroup.style.display = 'none';
+        skipFilestoreCheckbox.style.display = 'none';
+        skipDatabaseCheckbox.style.display = 'block';
+    } else {
+        targetProjectPathGroup.style.display = 'none';
+        postRestoreCommandsGroup.style.display = 'none';
+        filestorePathGroup.style.display = 'block';
+        skipFilestoreCheckbox.style.display = 'block';
+        skipDatabaseCheckbox.style.display = 'none';
+    }
+}
+
+function selectFromModal() {
+    let path = state.modalSelectDir ? state.modalFileBrowserPath : state.selectedFile;
+    
+    if (!path) {
+        showToast('Please select a path', 'warning');
+        return;
+    }
+    
+    // Convert /host paths to actual host paths (remove /host prefix for display)
+    // But keep /host in the path for internal use
+    let displayPath = path;
+    if (path.startsWith('/host')) {
+        // For display, show the actual host path (remove /host prefix)
+        displayPath = path.substring(5) || '/';
+    }
+    
+    if (state.modalTargetInput === 'projectPath' || state.modalTargetInput === 'targetProjectPath') {
+        document.getElementById(state.modalTargetInput).value = displayPath;
+        closeFileBrowserModal();
+    } else if (state.modalTargetInput === 'includeFolders') {
+        addIncludeFolder(displayPath);
+    } else {
+        document.getElementById(state.modalTargetInput).value = displayPath;
+    }
+    
+    closeFileBrowserModal();
+}
+
+// ============================================================================
+// Include Folders Management
+// ============================================================================
+
+function addIncludeFolder(path) {
+    if (!state.includeFolders.includes(path)) {
+        state.includeFolders.push(path);
+        renderIncludeFolders();
+    }
+}
+
+function removeIncludeFolder(path) {
+    state.includeFolders = state.includeFolders.filter(f => f !== path);
+    renderIncludeFolders();
+}
+
+function renderIncludeFolders() {
+    const container = document.querySelector('#includeFolders .tags-container');
+    container.innerHTML = state.includeFolders.map(folder => `
+        <span class="tag">
+            ${folder.split('/').pop() || folder}
+            <span class="tag-remove" onclick="removeIncludeFolder('${folder}')">×</span>
+        </span>
+    `).join('');
+}
+
+// ============================================================================
+// Saved Connections Management
+// ============================================================================
+
+async function loadSavedConnections() {
+    try {
+        const response = await fetch('/api/connections');
+        const data = await response.json();
+        
+        if (data.success) {
+            state.savedConnections = data.connections;
+            renderSavedConnections();
+        }
+    } catch (error) {
+        console.error('Error loading connections:', error);
+    }
+}
+
+function renderSavedConnections() {
+    const container = document.getElementById('savedConnectionsList');
+    const countBadge = document.getElementById('connectionCount');
+    
+    // Update connection count badge
+    if (countBadge) {
+        countBadge.textContent = state.savedConnections.length > 0 ? state.savedConnections.length : '';
+    }
+    
+    if (state.savedConnections.length === 0) {
+        container.innerHTML = '<div class="no-connections">No saved connections yet</div>';
+        return;
+    }
+    
+    container.innerHTML = state.savedConnections.map(conn => `
+        <div class="saved-connection-item ${state.activeConnectionId === conn.id ? 'active' : ''}" 
+             data-id="${conn.id}"
+             onclick="selectConnection('${conn.id}')">
+            <span class="connection-color-dot" style="background: ${conn.color || '#6B7280'}"></span>
+            <div class="connection-info">
+                <div class="connection-name">${escapeHtml(conn.name)}</div>
+                <div class="connection-details">${conn.username}@${conn.host}:${conn.port}</div>
+            </div>
+            <div class="connection-actions">
+                <button class="connection-action-btn" onclick="event.stopPropagation(); editConnection('${conn.id}')" title="Edit">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                </button>
+                <button class="connection-action-btn delete" onclick="event.stopPropagation(); deleteConnection('${conn.id}')" title="Delete">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3,6 5,6 21,6"/>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function selectConnection(connId) {
+    const conn = state.savedConnections.find(c => c.id === connId);
+    if (!conn) return;
+    
+    // Update form fields
+    document.getElementById('dbHost').value = conn.host;
+    document.getElementById('dbPort').value = conn.port;
+    document.getElementById('dbUsername').value = conn.username;
+    
+    // Fetch password if needed
+    try {
+        const response = await fetch(`/api/connections/${connId}?include_password=true`);
+        const data = await response.json();
+        if (data.success && data.connection.password) {
+            document.getElementById('dbPassword').value = data.connection.password;
+        } else {
+            document.getElementById('dbPassword').value = '';
+        }
+    } catch (error) {
+        document.getElementById('dbPassword').value = '';
+    }
+    
+    state.activeConnectionId = connId;
+    renderSavedConnections();
+    updateActiveConnectionBadge(conn.name);
+    showToast(`Switched to "${conn.name}"`, 'success');
+}
+
+function updateActiveConnectionBadge(name) {
+    const badge = document.getElementById('activeConnectionBadge');
+    badge.textContent = name || '';
+}
+
+function openConnectionModal(editId = null) {
+    const modal = document.getElementById('saveConnectionModal');
+    const title = document.getElementById('connectionModalTitle');
+    const saveBtn = document.getElementById('saveConnectionBtn');
+    
+    state.editingConnectionId = editId;
+    
+    if (editId) {
+        const conn = state.savedConnections.find(c => c.id === editId);
+        if (conn) {
+            title.textContent = 'Edit Connection';
+            saveBtn.textContent = 'Update Connection';
+            document.getElementById('connectionName').value = conn.name;
+            document.getElementById('modalConnHost').value = conn.host;
+            document.getElementById('modalConnPort').value = conn.port;
+            document.getElementById('modalConnUsername').value = conn.username;
+            document.getElementById('modalConnPassword').value = '';
+            document.getElementById('modalConnPassword').placeholder = conn.has_password ? '••••••• (unchanged)' : 'Enter password';
+            selectColor(conn.color || '#00D4AA');
+        }
+    } else {
+        title.textContent = 'Save Connection';
+        saveBtn.textContent = 'Save Connection';
+        document.getElementById('connectionName').value = '';
+        document.getElementById('modalConnHost').value = document.getElementById('dbHost').value;
+        document.getElementById('modalConnPort').value = document.getElementById('dbPort').value;
+        document.getElementById('modalConnUsername').value = document.getElementById('dbUsername').value;
+        document.getElementById('modalConnPassword').value = document.getElementById('dbPassword').value;
+        document.getElementById('modalConnPassword').placeholder = 'Enter password';
+        selectColor('#00D4AA');
+    }
+    
+    modal.classList.add('show');
+}
+
+function closeConnectionModal() {
+    document.getElementById('saveConnectionModal').classList.remove('show');
+    state.editingConnectionId = null;
+}
+
+function selectColor(color) {
+    state.selectedColor = color;
+    document.querySelectorAll('.color-option').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.color === color);
+    });
+}
+
+async function saveConnection() {
+    const name = document.getElementById('connectionName').value.trim();
+    const host = document.getElementById('modalConnHost').value || 'localhost';
+    const port = parseInt(document.getElementById('modalConnPort').value) || 5432;
+    const username = document.getElementById('modalConnUsername').value || 'postgres';
+    const password = document.getElementById('modalConnPassword').value || null;
+    
+    if (!name) {
+        showToast('Please enter a connection name', 'error');
+        return;
+    }
+    
+    const payload = {
+        name,
+        host,
+        port,
+        username,
+        password: password || undefined,
+        color: state.selectedColor
+    };
+    
+    try {
+        let response;
+        if (state.editingConnectionId) {
+            response = await fetch(`/api/connections/${state.editingConnectionId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        } else {
+            response = await fetch('/api/connections', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        }
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast(data.message, 'success');
+            closeConnectionModal();
+            await loadSavedConnections();
+        } else {
+            showToast(data.detail || 'Failed to save connection', 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+function editConnection(connId) {
+    openConnectionModal(connId);
+}
+
+async function deleteConnection(connId) {
+    const conn = state.savedConnections.find(c => c.id === connId);
+    if (!conn) return;
+    
+    if (!confirm(`Delete connection "${conn.name}"?`)) return;
+    
+    try {
+        const response = await fetch(`/api/connections/${connId}`, {
+            method: 'DELETE'
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast(data.message, 'success');
+            if (state.activeConnectionId === connId) {
+                state.activeConnectionId = null;
+                updateActiveConnectionBadge('');
+            }
+            await loadSavedConnections();
+        } else {
+            showToast(data.detail || 'Failed to delete connection', 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+// ============================================================================
+// Collapsible Saved Connections
+// ============================================================================
+
+function toggleSavedConnections() {
+    const section = document.getElementById('savedConnectionsSection');
+    if (section) {
+        section.classList.toggle('collapsed');
+        // Save state to localStorage
+        localStorage.setItem('savedConnectionsCollapsed', section.classList.contains('collapsed'));
+    }
+}
+
+function loadSavedConnectionsState() {
+    const isCollapsed = localStorage.getItem('savedConnectionsCollapsed') === 'true';
+    const section = document.getElementById('savedConnectionsSection');
+    if (section && isCollapsed) {
+        section.classList.add('collapsed');
+    }
+}
+
+// ============================================================================
+// Configuration Helpers
+// ============================================================================
+
+function getConnectionConfig() {
+    return {
+        host: document.getElementById('dbHost').value || 'host.docker.internal',
+        port: parseInt(document.getElementById('dbPort').value) || 5432,
+        username: document.getElementById('dbUsername').value || 'postgres',
+        password: document.getElementById('dbPassword').value || null
+    };
+}
+
+function getStorageConfig() {
+    let type = state.storageType;
+    // Ensure storage type is valid, default to 'local' if not
+    const validTypes = ['local', 's3', 'minio', 'gdrive'];
+    if (!validTypes.includes(type)) {
+        type = 'local';
+        state.storageType = 'local';
+    }
+    const config = { storage_type: type };
+    
+    if (type === 's3') {
+        config.access_key = document.getElementById('s3AccessKey')?.value;
+        config.secret_key = document.getElementById('s3SecretKey')?.value;
+        config.bucket = document.getElementById('s3Bucket')?.value;
+        config.region = document.getElementById('s3Region')?.value;
+    } else if (type === 'minio') {
+        config.endpoint = document.getElementById('minioEndpoint')?.value;
+        config.access_key = document.getElementById('minioAccessKey')?.value;
+        config.secret_key = document.getElementById('minioSecretKey')?.value;
+        config.bucket = document.getElementById('minioBucket')?.value;
+    } else if (type === 'gdrive') {
+        config.credentials_path = document.getElementById('gdriveCredentials')?.value;
+    }
+    
+    return config;
+}
+
+// ============================================================================
+// Tab Management
+// ============================================================================
+
+function switchTab(tabName) {
+    state.currentTab = tabName;
+    
+    // Update tab buttons
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+    
+    // Update tab content
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tabName}`);
+    });
+    
+    // Update start button text
+    const startBtn = document.getElementById('startBtn');
+    if (tabName === 'backup') {
+        startBtn.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5,3 19,12 5,21"/>
+            </svg>
+            Start Backup
+        `;
+    } else if (tabName === 'restore') {
+        startBtn.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5,3 19,12 5,21"/>
+            </svg>
+            Start Restore
+        `;
+    }
+    
+    // Load data for specific tabs
+    if (tabName === 'files') {
+        loadFileBrowser(state.fileBrowserPath);
+        loadBackups();
+    }
+}
+
+function switchStorageType(type) {
+    state.storageType = type;
+    
+    // Update segment buttons - only storage type segments
+    document.querySelectorAll('#storageConfig .segment').forEach(seg => {
+        seg.classList.toggle('active', seg.dataset.value === type);
+    });
+    
+    // Update storage config visibility
+    document.querySelectorAll('#storageConfig > div').forEach(div => {
+        div.classList.toggle('active', div.classList.contains(`storage-${type}`));
+    });
+}
+
+// ============================================================================
+// Theme Management
+// ============================================================================
+
+function toggleTheme() {
+    const html = document.documentElement;
+    const currentTheme = html.dataset.theme || 'dark';
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    html.dataset.theme = newTheme;
+    localStorage.setItem('theme', newTheme);
+}
+
+function loadTheme() {
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    document.documentElement.dataset.theme = savedTheme;
+}
+
+// ============================================================================
+// Toast Notifications
+// ============================================================================
+
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+        <span class="toast-message">${message}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+    `;
+    
+    container.appendChild(toast);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+        toast.style.animation = 'slideIn 0.3s ease reverse';
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function capitalize(str) {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function getCurrentTime() {
+    return new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+
+function formatFileSize(bytes) {
+    if (bytes === null || bytes === undefined) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (bytes >= 1024 && i < units.length - 1) {
+        bytes /= 1024;
+        i++;
+    }
+    return `${bytes.toFixed(1)} ${units[i]}`;
+}
+
+function formatDate(isoString) {
+    return new Date(isoString).toLocaleString();
+}
+
+// ============================================================================
+// Event Listeners
+// ============================================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Load theme
+    loadTheme();
+    
+    // Load saved connections collapsed state
+    loadSavedConnectionsState();
+    
+    // Connect WebSocket
+    connectWebSocket();
+    
+    // Load saved connections
+    loadSavedConnections();
+    
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+    });
+    
+    // Storage type switching
+    // Storage type segments only
+    document.querySelectorAll('#storageConfig .segment').forEach(seg => {
+        seg.addEventListener('click', () => switchStorageType(seg.dataset.value));
+    });
+    
+    // Theme toggle
+    document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+    
+    // Connection buttons
+    document.getElementById('testConnection').addEventListener('click', testConnection);
+    document.getElementById('listDatabases').addEventListener('click', listDatabases);
+    
+    // Saved connections buttons
+    document.getElementById('addConnectionBtn').addEventListener('click', () => openConnectionModal());
+    document.getElementById('saveCurrentConnection').addEventListener('click', () => openConnectionModal());
+    document.getElementById('saveConnectionBtn').addEventListener('click', saveConnection);
+    
+    // Color picker
+    document.querySelectorAll('.color-option').forEach(btn => {
+        btn.addEventListener('click', () => selectColor(btn.dataset.color));
+    });
+    
+    // Close connection modal on backdrop click
+    document.getElementById('saveConnectionModal').addEventListener('click', (e) => {
+        if (e.target.id === 'saveConnectionModal') {
+            closeConnectionModal();
+        }
+    });
+    
+    // Action buttons
+    document.getElementById('startBtn').addEventListener('click', startOperation);
+    document.getElementById('stopBtn').addEventListener('click', stopOperation);
+    
+    // Terminal buttons
+    document.getElementById('clearLogs').addEventListener('click', clearLogs);
+    document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
+    
+    // File browser navigation
+    document.getElementById('fileBrowserBack').addEventListener('click', () => {
+        navigateBack('fileList', 'fileBrowserPath');
+    });
+    document.getElementById('fileBrowserRefresh').addEventListener('click', () => {
+        loadFileBrowser(state.fileBrowserPath);
+    });
+    
+    // Modal file browser
+    document.getElementById('modalBrowserBack').addEventListener('click', () => {
+        navigateBack('modalFileList', 'modalBrowserPath');
+    });
+    document.getElementById('modalSelectBtn').addEventListener('click', selectFromModal);
+    
+    // Close modal on backdrop click
+    document.getElementById('fileBrowserModal').addEventListener('click', (e) => {
+        if (e.target.id === 'fileBrowserModal') {
+            closeFileBrowserModal();
+        }
+    });
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeFileBrowserModal();
+            closeConnectionModal();
+        }
+    });
+    
+    // Keep WebSocket alive
+    setInterval(() => {
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send('ping');
+        }
+    }, 30000);
+});
+

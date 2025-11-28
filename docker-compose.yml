@@ -1,0 +1,115 @@
+<<<<<<< Current (Your changes)
+=======
+# PostgreSQL Backup Manager - Docker Compose Configuration
+# 
+# ============================================================================
+# BEST PRACTICES:
+# ============================================================================
+# - All PostgreSQL client tools (pg_dump, psql) run INSIDE the container
+# - Container includes PostgreSQL clients for versions 14-18
+# - No need to install PostgreSQL tools on host machine
+# - Backups are performed by the container, stored on mounted volumes
+#
+# Usage:
+#   docker-compose up -d          # Start the service
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop the service
+#
+# Access the web interface at: http://localhost:6536
+# ============================================================================
+
+version: '3.8'
+
+services:
+  postgres-backup-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pg-backup-manager:latest
+    container_name: pg-backup-manager
+    restart: unless-stopped
+    
+    # Mount the host filesystem for backup access
+    # The container reads/writes backups through these mounts
+    volumes:
+      # Mount host root filesystem (read-write for backup operations)
+      - /:/host:rw
+      
+      # Direct bind mount for /tmp to ensure backups are visible on host
+      - /tmp:/host/tmp:rw
+      
+      # Mount Docker socket for Docker-in-Docker operations
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+      # Alternative: Mount specific directories only (more secure)
+      # Uncomment these and comment out the line above for restricted access:
+      # - /home:/host/home:rw
+      # - /var:/host/var:rw
+      # - /opt:/host/opt:rw
+      
+      # Persist application logs
+      - backup_logs:/app/logs
+      
+      # Persist saved connections
+      - connections_data:/app/data
+    
+    ports:
+      - "6536:6536"
+    
+    environment:
+      # Application settings
+      - BACKUP_SCRIPT_PATH=/app/backup_script.py
+      - HOST_ROOT=/host
+      - DEFAULT_BACKUP_DIR=/host/tmp/postgres-backups
+      # Host UID/GID for file ownership (adjust if your user has different UID/GID)
+      - HOST_UID=1000
+      - HOST_GID=1000
+      
+      # Default database connection (can be changed in web UI)
+      # Use 'host.docker.internal' to connect to databases on the host machine
+      - DB_HOST=host.docker.internal
+      - DB_PORT=5432
+      - DB_USER=postgres
+    
+    # Add host.docker.internal to connect to host machine's localhost
+    # This allows connecting to PostgreSQL running on the host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # Alternative: Use host network mode for direct localhost access
+    # Uncomment this if host.docker.internal doesn't work
+    # network_mode: host
+    
+    # Run with elevated privileges for full filesystem access
+    # WARNING: Only enable in trusted environments
+    privileged: true
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:false
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6536/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits (adjust based on your backup sizes)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  backup_logs:
+    driver: local
+  connections_data:
+    driver: local
+
+>>>>>>> Incoming (Background Agent changes)

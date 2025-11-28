@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PostgreSQL Backup Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <path d="M16 2C8.268 2 2 8.268 2 16s6.268 14 14 14 14-6.268 14-14S23.732 2 16 2z" fill="#336791"/>
+                        <path d="M16 6c-5.523 0-10 4.477-10 10s4.477 10 10 10 10-4.477 10-10S21.523 6 16 6zm0 2c1.657 0 3 1.343 3 3v2h-6v-2c0-1.657 1.343-3 3-3zm-4 7h8v6c0 1.105-.895 2-2 2h-4c-1.105 0-2-.895-2-2v-6z" fill="#fff"/>
+                    </svg>
+                    <span>PostgreSQL Backup Manager</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-indicator" id="statusIndicator">
+                    <span class="status-dot idle"></span>
+                    <span class="status-text">Idle</span>
+                </div>
+                <button class="btn btn-icon" id="themeToggle" title="Toggle theme">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Left Panel: Configuration -->
+            <div class="panel config-panel">
+                <div class="config-scroll-area">
+                <!-- Saved Connections Section -->
+                <section class="section saved-connections-section collapsible" id="savedConnectionsSection">
+                    <h2 class="section-title collapsible-header" onclick="toggleSavedConnections()">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        Saved Connections
+                        <span class="connection-count" id="connectionCount"></span>
+                        <svg class="collapse-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="6,9 12,15 18,9"/>
+                        </svg>
+                    </h2>
+                    <div class="collapsible-content" id="savedConnectionsContent">
+                        <div class="saved-connections-list" id="savedConnectionsList">
+                            <div class="loading-text">Loading connections...</div>
+                        </div>
+                        <button class="btn btn-sm btn-add-connection" id="addConnectionBtn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            Add Connection
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Connection Section -->
+                <section class="section">
+                    <h2 class="section-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                        </svg>
+                        Database Connection
+                        <span class="active-connection-badge" id="activeConnectionBadge"></span>
+                    </h2>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Host</label>
+                            <input type="text" id="dbHost" value="host.docker.internal" placeholder="host.docker.internal">
+                        </div>
+                        <div class="form-group">
+                            <label>Port</label>
+                            <input type="number" id="dbPort" value="5432" placeholder="5432">
+                        </div>
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" id="dbUsername" value="postgres" placeholder="postgres">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" id="dbPassword" placeholder="Enter password">
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" id="testConnection">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                                <polyline points="22,4 12,14.01 9,11.01"/>
+                            </svg>
+                            Test Connection
+                        </button>
+                        <button class="btn btn-secondary" id="listDatabases">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                            </svg>
+                            List Databases
+                        </button>
+                        <button class="btn btn-secondary" id="saveCurrentConnection" title="Save current connection">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                <polyline points="17,21 17,13 7,13 7,21"/>
+                                <polyline points="7,3 7,8 15,8"/>
+                            </svg>
+                            Save
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Tabs -->
+                <div class="tabs">
+                    <button class="tab active" data-tab="backup">Backup</button>
+                    <button class="tab" data-tab="restore">Restore</button>
+                    <button class="tab" data-tab="storage">Storage</button>
+                    <button class="tab" data-tab="files">Files</button>
+                </div>
+
+                <!-- Backup Tab -->
+                <section class="tab-content active" id="tab-backup">
+                    <h2 class="section-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17,8 12,3 7,8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        Backup Configuration
+                    </h2>
+                    <div class="form-stack">
+                        <div class="form-group">
+                            <label>Database</label>
+                            <div class="input-with-dropdown">
+                                <input type="text" id="backupDatabase" placeholder="Leave empty for all databases">
+                                <div class="dropdown" id="dbDropdown"></div>
+                            </div>
+                            <span class="hint">Leave empty to backup all user databases</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Backup Directory</label>
+                            <div class="input-with-button">
+                                <input type="text" id="backupDir" value="/tmp/postgres-backups" placeholder="/tmp/postgres-backups">
+                                <button class="btn btn-icon" onclick="openFileBrowser('backupDir', true)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Project Path</label>
+                            <div class="input-with-button">
+                                <input type="text" id="projectPath" placeholder="Full project path to backup (all folders inside)">
+                                <button class="btn btn-icon" onclick="openFileBrowser('projectPath', true)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <span class="hint">Optional: Backup entire project folder with all subfolders</span>
+                        </div>
+                        <div class="form-group">
+                            <label>Include Folders (Legacy)</label>
+                            <div class="tags-input" id="includeFolders">
+                                <div class="tags-container"></div>
+                                <button class="btn btn-sm" onclick="openFileBrowser('includeFolders', true)">+ Add Folder</button>
+                            </div>
+                            <span class="hint">Legacy: Use Project Path instead for full project backup</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Restore Tab -->
+                <section class="tab-content" id="tab-restore">
+                    <h2 class="section-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7,10 12,15 17,10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Restore Configuration
+                    </h2>
+                    <div class="form-stack">
+                        <div class="form-group">
+                            <label>Database Name <span class="required">*</span></label>
+                            <input type="text" id="restoreDatabase" placeholder="Required - database to restore">
+                        </div>
+                        <div class="form-group">
+                            <label>Backup Directory</label>
+                            <div class="input-with-button">
+                                <input type="text" id="restoreBackupDir" value="/tmp/postgres-backups" placeholder="/tmp/postgres-backups">
+                                <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupDir', true)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Backup File</label>
+                            <div class="input-with-button">
+                                <input type="text" id="restoreBackupFile" placeholder="Optional - uses latest if empty">
+                                <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupFile', false)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                        <polyline points="14,2 14,8 20,8"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Restore Type</label>
+                            <div class="segmented-control" id="restoreTypeControl">
+                                <button class="segment active" data-value="database" onclick="changeRestoreType('database')">Database Only</button>
+                                <button class="segment" data-value="project" onclick="changeRestoreType('project')">Full Project</button>
+                            </div>
+                        </div>
+                        <div class="checkbox-group">
+                            <label class="checkbox">
+                                <input type="checkbox" id="dropExisting" checked>
+                                <span class="checkmark"></span>
+                                Drop existing database before restore
+                            </label>
+                            <label class="checkbox" id="skipFilestoreCheckbox">
+                                <input type="checkbox" id="skipFilestore">
+                                <span class="checkmark"></span>
+                                Skip filestore restoration
+                            </label>
+                            <label class="checkbox" id="skipDatabaseCheckbox" style="display: none;">
+                                <input type="checkbox" id="skipDatabase">
+                                <span class="checkmark"></span>
+                                Skip database restoration (project only)
+                            </label>
+                        </div>
+                        <div class="form-group" id="targetProjectPathGroup" style="display: none;">
+                            <label>Target Project Path <span class="required">*</span></label>
+                            <div class="input-with-button">
+                                <input type="text" id="targetProjectPath" placeholder="Path where project should be restored">
+                                <button class="btn btn-icon" onclick="openFileBrowser('targetProjectPath', true)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <span class="hint">Required for project restore</span>
+                        </div>
+                        <div class="form-group" id="postRestoreCommandsGroup" style="display: none;">
+                            <label>Post-Restore Commands</label>
+                            <textarea id="postRestoreCommands" rows="4" placeholder="Enter commands to run sequentially after restore (one per line)&#10;Example:&#10;docker-compose up -d&#10;sleep 10&#10;python restore_database.py"></textarea>
+                            <span class="hint">Commands will be executed sequentially in the project directory</span>
+                        </div>
+                        <div class="form-group" id="filestorePathGroup">
+                            <label>Filestore Path</label>
+                            <div class="input-with-button">
+                                <input type="text" id="filestorePath" placeholder="Optional - auto-detected if empty">
+                                <button class="btn btn-icon" onclick="openFileBrowser('filestorePath', true)">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Storage Tab -->
+                <section class="tab-content" id="tab-storage">
+                    <h2 class="section-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+                        </svg>
+                        Storage Configuration
+                    </h2>
+                    <div class="form-stack">
+                        <div class="form-group">
+                            <label>Storage Type</label>
+                            <div class="segmented-control">
+                                <button class="segment active" data-value="local">Local</button>
+                                <button class="segment" data-value="s3">S3</button>
+                                <button class="segment" data-value="minio">MinIO</button>
+                                <button class="segment" data-value="gdrive">Google Drive</button>
+                            </div>
+                        </div>
+                        
+                        <div id="storageConfig">
+                            <div class="storage-local active">
+                                <p class="info-text">Backups will be stored locally in the specified backup directory.</p>
+                            </div>
+                            
+                            <div class="storage-s3">
+                                <div class="form-group">
+                                    <label>Access Key</label>
+                                    <input type="text" id="s3AccessKey" placeholder="AWS Access Key ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>Secret Key</label>
+                                    <input type="password" id="s3SecretKey" placeholder="AWS Secret Access Key">
+                                </div>
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label>Bucket</label>
+                                        <input type="text" id="s3Bucket" placeholder="my-backup-bucket">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Region</label>
+                                        <input type="text" id="s3Region" placeholder="us-east-1">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="storage-minio">
+                                <div class="form-group">
+                                    <label>Endpoint</label>
+                                    <input type="text" id="minioEndpoint" placeholder="minio.example.com:9000">
+                                </div>
+                                <div class="form-group">
+                                    <label>Access Key</label>
+                                    <input type="text" id="minioAccessKey" placeholder="MinIO Access Key">
+                                </div>
+                                <div class="form-group">
+                                    <label>Secret Key</label>
+                                    <input type="password" id="minioSecretKey" placeholder="MinIO Secret Key">
+                                </div>
+                                <div class="form-group">
+                                    <label>Bucket</label>
+                                    <input type="text" id="minioBucket" placeholder="my-backup-bucket">
+                                </div>
+                            </div>
+                            
+                            <div class="storage-gdrive">
+                                <div class="form-group">
+                                    <label>Credentials File</label>
+                                    <div class="input-with-button">
+                                        <input type="text" id="gdriveCredentials" placeholder="Path to service account JSON">
+                                        <button class="btn btn-icon" onclick="openFileBrowser('gdriveCredentials', false)">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                                <polyline points="14,2 14,8 20,8"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Files Tab -->
+                <section class="tab-content" id="tab-files">
+                    <h2 class="section-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        File Browser
+                    </h2>
+                    <div class="file-browser" id="fileBrowser">
+                        <div class="file-browser-header">
+                            <button class="btn btn-icon" id="fileBrowserBack" disabled>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="15,18 9,12 15,6"/>
+                                </svg>
+                            </button>
+                            <input type="text" id="fileBrowserPath" value="/host" readonly>
+                            <button class="btn btn-icon" id="fileBrowserRefresh">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23,4 23,10 17,10"/>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="file-list" id="fileList">
+                            <div class="file-list-loading">Loading...</div>
+                        </div>
+                    </div>
+                    
+                    <h3 class="subsection-title">Available Backups</h3>
+                    <div class="backup-list" id="backupList">
+                        <div class="backup-list-loading">Loading backups...</div>
+                    </div>
+                </section>
+
+                </div><!-- End config-scroll-area -->
+                
+                <!-- Action Buttons - Fixed at bottom -->
+                <div class="action-buttons">
+                    <button class="btn btn-primary btn-lg" id="startBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="5,3 19,12 5,21"/>
+                        </svg>
+                        Start Backup
+                    </button>
+                    <button class="btn btn-danger btn-lg" id="stopBtn" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="6" y="6" width="12" height="12"/>
+                        </svg>
+                        Stop
+                    </button>
+                </div>
+            </div>
+
+            <!-- Right Panel: Terminal -->
+            <div class="panel terminal-panel">
+                <div class="terminal-header">
+                    <div class="terminal-title">
+                        <span class="terminal-dot"></span>
+                        Live Terminal
+                    </div>
+                    <div class="terminal-actions">
+                        <button class="btn btn-sm" id="clearLogs">Clear</button>
+                        <button class="btn btn-sm" id="downloadLogs">Download</button>
+                    </div>
+                </div>
+                <div class="terminal-body" id="terminalBody">
+                    <div class="terminal-welcome">
+                        <p>Connecting to server...</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Save Connection Modal -->
+        <div class="modal" id="saveConnectionModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="connectionModalTitle">Save Connection</h3>
+                    <button class="btn btn-icon modal-close" onclick="closeConnectionModal()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-stack">
+                        <div class="form-group">
+                            <label>Connection Name <span class="required">*</span></label>
+                            <input type="text" id="connectionName" placeholder="e.g., Production DB, Local Dev">
+                        </div>
+                        <div class="form-group">
+                            <label>Color Tag</label>
+                            <div class="color-picker">
+                                <button class="color-option" data-color="#00D4AA" style="background:#00D4AA"></button>
+                                <button class="color-option" data-color="#FF6B6B" style="background:#FF6B6B"></button>
+                                <button class="color-option" data-color="#4ECDC4" style="background:#4ECDC4"></button>
+                                <button class="color-option" data-color="#FFE66D" style="background:#FFE66D"></button>
+                                <button class="color-option" data-color="#A855F7" style="background:#A855F7"></button>
+                                <button class="color-option" data-color="#F97316" style="background:#F97316"></button>
+                                <button class="color-option" data-color="#06B6D4" style="background:#06B6D4"></button>
+                                <button class="color-option" data-color="#EC4899" style="background:#EC4899"></button>
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Host</label>
+                                <input type="text" id="modalConnHost" placeholder="host.docker.internal" value="host.docker.internal">
+                            </div>
+                            <div class="form-group">
+                                <label>Port</label>
+                                <input type="number" id="modalConnPort" placeholder="5432">
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Username</label>
+                                <input type="text" id="modalConnUsername" placeholder="postgres">
+                            </div>
+                            <div class="form-group">
+                                <label>Password</label>
+                                <input type="password" id="modalConnPassword" placeholder="Enter password">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeConnectionModal()">Cancel</button>
+                    <button class="btn btn-primary" id="saveConnectionBtn">Save Connection</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Browser Modal -->
+        <div class="modal" id="fileBrowserModal">
+            <div class="modal-content modal-lg">
+                <div class="modal-header">
+                    <h3>Select Path</h3>
+                    <button class="btn btn-icon modal-close" onclick="closeFileBrowserModal()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="file-browser-modal">
+                        <div class="file-browser-header">
+                            <button class="btn btn-icon" id="modalBrowserBack" disabled>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="15,18 9,12 15,6"/>
+                                </svg>
+                            </button>
+                            <input type="text" id="modalBrowserPath" value="/host" readonly>
+                        </div>
+                        <div class="file-list" id="modalFileList">
+                            <div class="file-list-loading">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeFileBrowserModal()">Cancel</button>
+                    <button class="btn btn-primary" id="modalSelectBtn">Select</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Container -->
+        <div class="toast-container" id="toastContainer"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
+
