@@ -1,5 +1,5 @@
 /**
- * PostgreSQL Backup Manager - Frontend Application
+ * PG Backup Manager - Frontend Application
  */
 
 // ============================================================================
@@ -261,9 +261,84 @@ function selectDatabase(db) {
     document.getElementById('dbDropdown').classList.remove('show');
 }
 
+function validateRestoreForm() {
+    const tab = state.currentTab;
+    if (tab !== 'restore') return true;
+    
+    const restoreType = document.querySelector('.restore-type-tab.active')?.dataset.restoreType || 'database';
+    
+    if (restoreType === 'database') {
+        const database = document.getElementById('restoreDatabase')?.value.trim();
+        const sqlDumpFile = document.getElementById('restoreSqlDumpFile')?.value.trim();
+        
+        // Database name is required unless SQL dump file is provided
+        if (!database && !sqlDumpFile) {
+            return false;
+        }
+    } else if (restoreType === 'project') {
+        const targetProjectPath = document.getElementById('targetProjectPath')?.value.trim();
+        if (!targetProjectPath) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+function updateStartButtonState() {
+    const startBtn = document.getElementById('startBtn');
+    if (!startBtn) return;
+    
+    // Don't change button state if operation is running
+    if (state.isRunning) {
+        startBtn.disabled = true;
+        return;
+    }
+    
+    // Enable button if form is valid
+    const isValid = validateRestoreForm();
+    startBtn.disabled = !isValid;
+}
+
 async function startOperation() {
+    // Prevent double-clicking
+    if (state.isRunning) {
+        showToast('An operation is already running', 'warning');
+        return;
+    }
+    
     const tab = state.currentTab;
     let endpoint, payload;
+    
+    // Validate form before disabling button
+    if (tab === 'restore') {
+        const restoreType = document.querySelector('.restore-type-tab.active')?.dataset.restoreType || 'database';
+        
+        if (restoreType === 'database') {
+            const database = document.getElementById('restoreDatabase').value.trim();
+            const sqlDumpFile = document.getElementById('restoreSqlDumpFile').value.trim();
+            
+            if (!database && !sqlDumpFile) {
+                showToast('Database name is required for database-only restore (or provide SQL dump file)', 'error');
+                updateStartButtonState(); // Re-enable button
+                return;
+            }
+        } else if (restoreType === 'project') {
+            const targetProjectPath = document.getElementById('targetProjectPath').value.trim();
+            if (!targetProjectPath) {
+                showToast('Target project path is required for project restore', 'error');
+                updateStartButtonState(); // Re-enable button
+                return;
+            }
+        }
+    }
+    
+    // Disable button immediately to prevent double-clicks
+    state.isRunning = true;
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
     
     if (tab === 'backup') {
         endpoint = '/api/backup';
@@ -272,44 +347,66 @@ async function startOperation() {
             connection: getConnectionConfig(),
             storage: getStorageConfig(),
             database: document.getElementById('backupDatabase').value || null,
-            backup_dir: document.getElementById('backupDir').value || '/tmp/postgres-backups',
+            backup_dir: document.getElementById('backupDir').value || '/tmp/db-backups',
             project_path: projectPath || null,
             include_folders: (!projectPath && state.includeFolders.length > 0) ? state.includeFolders : null
         };
     } else if (tab === 'restore') {
-        const database = document.getElementById('restoreDatabase').value;
-        if (!database) {
-            showToast('Database name is required for restore', 'error');
-            return;
-        }
+        // Determine restore type from active tab
+        const restoreType = document.querySelector('.restore-type-tab.active')?.dataset.restoreType || 'database';
         
-        const restoreType = document.querySelector('#restoreTypeControl .segment.active')?.dataset.value || 'database';
-        
-        if (restoreType === 'project') {
+        if (restoreType === 'database') {
+            // Database Only Restore
+            const database = document.getElementById('restoreDatabase').value.trim();
+            const sqlDumpFile = document.getElementById('restoreSqlDumpFile').value.trim() || null;
+            
+            if (!database && !sqlDumpFile) {
+                showToast('Database name is required for database-only restore (or provide SQL dump file)', 'error');
+                state.isRunning = false;
+                updateStartButtonState(); // Re-enable button
+                return;
+            }
+            
+            endpoint = '/api/restore';
+            payload = {
+                connection: getConnectionConfig(),
+                database: database,
+                backup_dir: document.getElementById('restoreBackupDir').value || '/tmp/db-backups',
+                backup_file: document.getElementById('restoreBackupFile').value || null,
+                sql_dump_file: sqlDumpFile,
+                drop_existing: document.getElementById('dropExisting').checked,
+                ignore_errors: document.getElementById('ignoreErrors').checked,
+                restore_type: 'database'
+            };
+        } else {
+            // Full Project Restore
             const targetProjectPath = document.getElementById('targetProjectPath').value.trim();
             if (!targetProjectPath) {
                 showToast('Target project path is required for project restore', 'error');
+                state.isRunning = false;
+                updateStartButtonState(); // Re-enable button
                 return;
             }
+            
+            const database = document.getElementById('restoreProjectDatabase').value.trim();
+            
+            endpoint = '/api/restore';
+            payload = {
+                connection: null, // No connection for project restore - uses .env
+                database: database || null, // Optional - if empty, restores all databases
+                backup_dir: document.getElementById('restoreProjectBackupDir').value || '/tmp/db-backups',
+                backup_file: document.getElementById('restoreProjectBackupFile').value || null,
+                drop_existing: true, // Always drop for project restore
+                ignore_errors: document.getElementById('ignoreErrorsProject').checked,
+                restore_type: 'project',
+                target_project_path: targetProjectPath,
+                skip_database: document.getElementById('skipDatabase').checked,
+                post_restore_commands: (() => {
+                    const commands = document.getElementById('postRestoreCommands').value.trim();
+                    return commands ? commands.split('\n').map(c => c.trim()).filter(c => c) : null;
+                })()
+            };
         }
-        
-        endpoint = '/api/restore';
-        payload = {
-            connection: getConnectionConfig(),
-            database: database,
-            backup_dir: document.getElementById('restoreBackupDir').value || '/tmp/postgres-backups',
-            backup_file: document.getElementById('restoreBackupFile').value || null,
-            drop_existing: document.getElementById('dropExisting').checked,
-            restore_type: restoreType,
-            skip_filestore: document.getElementById('skipFilestore').checked,
-            filestore_path: document.getElementById('filestorePath').value || null,
-            target_project_path: restoreType === 'project' ? document.getElementById('targetProjectPath').value.trim() : null,
-            skip_database: restoreType === 'project' ? document.getElementById('skipDatabase').checked : false,
-            post_restore_commands: restoreType === 'project' ? (() => {
-                const commands = document.getElementById('postRestoreCommands').value.trim();
-                return commands ? commands.split('\n').map(c => c.trim()).filter(c => c) : null;
-            })() : null
-        };
     } else {
         showToast('Please select Backup or Restore tab', 'warning');
         return;
@@ -327,9 +424,17 @@ async function startOperation() {
         if (response.ok) {
             showToast(`${capitalize(tab)} started`, 'success');
         } else {
+            // Re-enable button on error
+            state.isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
             showToast(data.detail || 'Operation failed', 'error');
         }
     } catch (error) {
+        // Re-enable button on error
+        state.isRunning = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
         showToast(`Error: ${error.message}`, 'error');
     }
 }
@@ -347,30 +452,47 @@ async function stopOperation() {
 // File Browser
 // ============================================================================
 
-async function loadFileBrowser(path = '/host', targetElement = 'fileList', pathInput = 'fileBrowserPath') {
+let searchTimeout = null;
+
+async function loadFileBrowser(path = '/host', targetElement = 'fileList', pathInput = 'fileBrowserPath', search = '') {
     const fileList = document.getElementById(targetElement);
     fileList.innerHTML = '<div class="file-list-loading">Loading...</div>';
     
     try {
-        const response = await fetch(`/api/files/browse?path=${encodeURIComponent(path)}`);
+        let url = `/api/files/browse?path=${encodeURIComponent(path)}`;
+        if (search) {
+            url += `&search=${encodeURIComponent(search)}`;
+        }
+        
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data.success) {
             if (pathInput === 'fileBrowserPath') {
-                state.fileBrowserPath = path;
+                state.fileBrowserPath = data.path; // Use server normalized path
             } else {
-                state.modalFileBrowserPath = path;
+                state.modalFileBrowserPath = data.path;
             }
             
-            document.getElementById(pathInput).value = path;
+            const pathInputEl = document.getElementById(pathInput);
+            if (pathInputEl) pathInputEl.value = data.path;
             
             // Update back button
             const backBtn = document.getElementById(pathInput === 'fileBrowserPath' ? 'fileBrowserBack' : 'modalBrowserBack');
-            backBtn.disabled = path === '/host' || path === '/';
+            if (backBtn) {
+                // If parent is null (root reached or restricted), disable back
+                const hasParent = data.parent && data.parent !== data.path;
+                backBtn.disabled = !hasParent;
+                if (hasParent) {
+                    backBtn.dataset.parent = data.parent;
+                } else {
+                    backBtn.dataset.parent = '';
+                }
+            }
             
             // Render file list
             if (data.items.length === 0) {
-                fileList.innerHTML = '<div class="file-list-loading">Empty directory</div>';
+                fileList.innerHTML = '<div class="file-list-loading">No items found</div>';
                 return;
             }
             
@@ -402,6 +524,12 @@ function handleFileClick(element, targetElement, pathInput) {
     const isDir = element.dataset.isDir === 'true';
     
     if (isDir) {
+        // Clear search when navigating
+        const searchInputId = pathInput === 'fileBrowserPath' ? 'fileBrowserSearch' : 'modalBrowserSearch';
+        const searchInput = document.getElementById(searchInputId);
+        if (searchInput) {
+            searchInput.value = '';
+        }
         loadFileBrowser(path, targetElement, pathInput);
     } else {
         // Select file
@@ -412,21 +540,157 @@ function handleFileClick(element, targetElement, pathInput) {
 }
 
 function navigateBack(targetElement, pathInput) {
+    const backBtn = document.getElementById(pathInput === 'fileBrowserPath' ? 'fileBrowserBack' : 'modalBrowserBack');
+    
+    if (!backBtn) {
+        console.error('Back button not found');
+        return;
+    }
+    
+    // Get current path from state or input
     const currentPath = pathInput === 'fileBrowserPath' ? state.fileBrowserPath : state.modalFileBrowserPath;
-    const parts = currentPath.split('/').filter(p => p);
-    if (parts.length > 1) {
-        // Remove last part, but keep /host
-        parts.pop();
-        const parentPath = '/' + '/'.join(parts);
+    
+    // Get parent path from button's data attribute (set by loadFileBrowser)
+    let parentPath = backBtn.dataset.parent;
+    
+    // Fallback: calculate parent manually if not set
+    if (!parentPath && currentPath) {
+        const parts = currentPath.split('/').filter(p => p);
+        if (parts.length > 1) {
+            parts.pop();
+            parentPath = '/' + parts.join('/');
+        } else if (parts.length === 1) {
+            // If we're at /host/host_mnt or /host, go to parent
+            parentPath = '/host';
+        }
+    }
+    
+    if (parentPath && !backBtn.disabled) {
+        // Clear search when navigating back
+        const searchInputId = pathInput === 'fileBrowserPath' ? 'fileBrowserSearch' : 'modalBrowserSearch';
+        const searchInput = document.getElementById(searchInputId);
+        if (searchInput) {
+            searchInput.value = '';
+        }
         loadFileBrowser(parentPath, targetElement, pathInput);
-    } else {
-        // Already at /host, can't go back further
-        loadFileBrowser('/host', targetElement, pathInput);
     }
 }
 
+// Store current folder creation context
+let folderCreationContext = null;
+
+function openCreateFolderModal(targetElement, pathInput) {
+    console.log('openCreateFolderModal called', { targetElement, pathInput });
+    
+    // Get current path from state or input field
+    let currentPath;
+    if (pathInput === 'fileBrowserPath') {
+        currentPath = state.fileBrowserPath;
+        if (!currentPath) {
+            const pathInputEl = document.getElementById('fileBrowserPath');
+            currentPath = pathInputEl ? pathInputEl.value : null;
+        }
+    } else {
+        currentPath = state.modalFileBrowserPath;
+        if (!currentPath) {
+            const pathInputEl = document.getElementById('modalBrowserPath');
+            currentPath = pathInputEl ? pathInputEl.value : null;
+        }
+        // If still empty, default to restricted root
+        if (!currentPath) {
+            currentPath = '/host/host_mnt';
+        }
+    }
+    
+    console.log('Current path:', currentPath);
+    
+    if (!currentPath) {
+        showToast('No path selected', 'error');
+        return;
+    }
+    
+    // Store context for when user confirms
+    folderCreationContext = { targetElement, pathInput, currentPath };
+    
+    // Clear and show modal
+    const input = document.getElementById('folderNameInput');
+    if (input) {
+        input.value = '';
+        input.focus();
+    } else {
+        console.error('folderNameInput not found');
+    }
+    
+    const modal = document.getElementById('createFolderModal');
+    if (modal) {
+        modal.classList.add('show');
+        console.log('Create folder modal shown');
+    } else {
+        console.error('createFolderModal not found');
+    }
+}
+
+function closeCreateFolderModal() {
+    const modal = document.getElementById('createFolderModal');
+    if (modal) {
+        modal.classList.remove('show');
+    }
+    folderCreationContext = null;
+}
+
+async function createFolder() {
+    if (!folderCreationContext) {
+        return;
+    }
+    
+    const { targetElement, pathInput, currentPath } = folderCreationContext;
+    const input = document.getElementById('folderNameInput');
+    
+    if (!input || !input.value || !input.value.trim()) {
+        showToast('Please enter a folder name', 'error');
+        return;
+    }
+    
+    const folderName = input.value.trim();
+    closeCreateFolderModal();
+    
+    try {
+        const response = await fetch('/api/files/create-folder', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                path: currentPath,
+                folder_name: folderName
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast(data.message || 'Folder created successfully', 'success');
+            // Refresh the file browser
+            const searchInputId = pathInput === 'fileBrowserPath' ? 'fileBrowserSearch' : 'modalBrowserSearch';
+            const searchInput = document.getElementById(searchInputId);
+            const search = searchInput ? searchInput.value : '';
+            loadFileBrowser(currentPath, targetElement, pathInput, search);
+        } else {
+            showToast(data.error || 'Failed to create folder', 'error');
+        }
+    } catch (error) {
+        console.error('Error creating folder:', error);
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+// Make functions globally available
+window.openCreateFolderModal = openCreateFolderModal;
+window.closeCreateFolderModal = closeCreateFolderModal;
+window.createFolder = createFolder;
+
 async function loadBackups() {
-    const backupDir = document.getElementById('backupDir')?.value || '/tmp/postgres-backups';
+    const backupDir = document.getElementById('backupDir')?.value || '/tmp/db-backups';
     const container = document.getElementById('backupList');
     container.innerHTML = '<div class="backup-list-loading">Loading backups...</div>';
     
@@ -435,29 +699,59 @@ async function loadBackups() {
         const data = await response.json();
         
         if (data.success && data.backups.length > 0) {
-            container.innerHTML = data.backups.map(group => `
+            container.innerHTML = data.backups.map(session => `
                 <div class="backup-group">
                     <div class="backup-group-title">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <ellipse cx="12" cy="5" rx="9" ry="3"/>
-                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
-                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="16" y1="2" x2="16" y2="6"/>
+                            <line x1="8" y1="2" x2="8" y2="6"/>
+                            <line x1="3" y1="10" x2="21" y2="10"/>
                         </svg>
-                        ${group.database}
+                        Session: ${session.session_id}
+                        <span style="font-weight: normal; font-size: 0.8em; margin-left: 10px; opacity: 0.7;">
+                            ${formatDate(session.created)}
+                        </span>
                     </div>
-                    ${group.backups.map(backup => `
-                        <div class="backup-item">
+                    
+                    ${session.has_files ? `
+                        <div class="backup-item file-backup">
                             <div class="backup-item-info">
-                                <span class="backup-item-name">${backup.file}</span>
-                                <span class="backup-item-meta">${formatFileSize(backup.size)} • ${formatDate(backup.created)}</span>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px;">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <polyline points="14,2 14,8 20,8"/>
+                                </svg>
+                                <span class="backup-item-name">Project Files</span>
                             </div>
                             <div class="backup-item-actions">
-                                <button class="btn btn-sm" onclick="useBackupForRestore('${backup.path}', '${group.database}')">
-                                    Use
+                                <span class="badge">Included</span>
+                            </div>
+                        </div>
+                    ` : ''}
+                    
+                    ${session.databases.map(db => `
+                        <div class="backup-item">
+                            <div class="backup-item-info">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px;">
+                                    <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                                </svg>
+                                <span class="backup-item-name">${db}</span>
+                            </div>
+                            <div class="backup-item-actions">
+                                <button class="btn btn-sm" onclick="useBackupForRestore('${session.path}', '${db}', 'specific')">
+                                    Restore DB
                                 </button>
                             </div>
                         </div>
                     `).join('')}
+                    
+                    <div class="backup-group-footer" style="padding: 10px; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end;">
+                        <button class="btn btn-sm btn-primary" onclick="useBackupForRestore('${session.path}', null, 'all')">
+                            Restore Session (All)
+                        </button>
+                    </div>
                 </div>
             `).join('');
         } else {
@@ -468,15 +762,23 @@ async function loadBackups() {
     }
 }
 
-function useBackupForRestore(path, database) {
+function useBackupForRestore(path, database, mode) {
     // Switch to restore tab
     switchTab('restore');
     
-    // Fill in the fields
-    document.getElementById('restoreDatabase').value = database;
-    document.getElementById('restoreBackupFile').value = path;
-    
-    showToast('Backup selected for restore', 'success');
+    if (mode === 'specific' && database) {
+        // Database-only restore
+        switchRestoreType('database');
+        document.getElementById('restoreBackupFile').value = path;
+        document.getElementById('restoreDatabase').value = database;
+        showToast(`Selected ${database} for database-only restore`, 'success');
+    } else {
+        // Full project restore (all databases)
+        switchRestoreType('project');
+        document.getElementById('restoreProjectBackupFile').value = path;
+        document.getElementById('restoreProjectDatabase').value = ''; // Empty = all databases
+        showToast('Selected full session for project restore', 'success');
+    }
 }
 
 // ============================================================================
@@ -489,39 +791,98 @@ function openFileBrowser(inputId, selectDir = true) {
     state.selectedFile = null;
     
     document.getElementById('fileBrowserModal').classList.add('show');
-    loadFileBrowser('/host', 'modalFileList', 'modalBrowserPath');
+    // Start from empty path to let API determine the restricted root
+    loadFileBrowser('', 'modalFileList', 'modalBrowserPath');
 }
 
 function closeFileBrowserModal() {
     document.getElementById('fileBrowserModal').classList.remove('show');
 }
 
-function changeRestoreType(type) {
-    // Update segmented control
-    const control = document.getElementById('restoreTypeControl');
-    control.querySelectorAll('.segment').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.value === type);
+function switchRestoreType(type) {
+    // Update tab buttons
+    const tabs = document.querySelectorAll('.restore-type-tab');
+    tabs.forEach(tab => {
+        tab.classList.remove('active');
+        if (tab.dataset.restoreType === type) {
+            tab.classList.add('active');
+        }
     });
     
-    // Show/hide relevant fields
-    const targetProjectPathGroup = document.getElementById('targetProjectPathGroup');
-    const postRestoreCommandsGroup = document.getElementById('postRestoreCommandsGroup');
-    const filestorePathGroup = document.getElementById('filestorePathGroup');
-    const skipFilestoreCheckbox = document.getElementById('skipFilestoreCheckbox');
-    const skipDatabaseCheckbox = document.getElementById('skipDatabaseCheckbox');
+    // Show/hide content sections with animation
+    const databaseOnlyContent = document.getElementById('restore-database-only');
+    const fullProjectContent = document.getElementById('restore-full-project');
+    const connectionSection = document.getElementById('connectionSection');
     
     if (type === 'project') {
-        targetProjectPathGroup.style.display = 'block';
-        postRestoreCommandsGroup.style.display = 'block';
-        filestorePathGroup.style.display = 'none';
-        skipFilestoreCheckbox.style.display = 'none';
-        skipDatabaseCheckbox.style.display = 'block';
+        // Hide database-only content
+        if (databaseOnlyContent) {
+            databaseOnlyContent.classList.remove('active');
+        }
+        // Show full project content
+        if (fullProjectContent) {
+            fullProjectContent.classList.add('active');
+        }
+        // Hide connection section for project restore
+        if (connectionSection) {
+            connectionSection.setAttribute('hidden', 'true');
+            connectionSection.classList.add('hidden');
+        }
     } else {
-        targetProjectPathGroup.style.display = 'none';
-        postRestoreCommandsGroup.style.display = 'none';
-        filestorePathGroup.style.display = 'block';
-        skipFilestoreCheckbox.style.display = 'block';
-        skipDatabaseCheckbox.style.display = 'none';
+        // Show database-only content
+        if (databaseOnlyContent) {
+            databaseOnlyContent.classList.add('active');
+        }
+        // Hide full project content
+        if (fullProjectContent) {
+            fullProjectContent.classList.remove('active');
+        }
+        // Show connection section for database-only restore
+        if (connectionSection) {
+            connectionSection.removeAttribute('hidden');
+            connectionSection.classList.remove('hidden');
+        }
+    }
+    
+    // Update button state after switching restore type
+    updateStartButtonState();
+}
+
+// Make function globally available
+window.switchRestoreType = switchRestoreType;
+
+// Legacy function for backward compatibility
+function changeRestoreType(type) {
+    switchRestoreType(type);
+}
+
+// Make connection functions globally available for onclick handlers
+window.openConnectionModal = openConnectionModal;
+window.closeConnectionModal = closeConnectionModal;
+window.selectConnection = selectConnection;
+window.editConnection = editConnection;
+window.deleteConnection = deleteConnection;
+
+// Toggle restore inputs based on SQL dump file selection
+function toggleRestoreInputs() {
+    const sqlDumpFile = document.getElementById('restoreSqlDumpFile');
+    const backupDirGroup = document.getElementById('restoreBackupDirGroup');
+    const backupFileGroup = document.getElementById('restoreBackupFileGroup');
+    
+    if (!sqlDumpFile || !backupDirGroup || !backupFileGroup) {
+        return;
+    }
+    
+    const hasSqlFile = sqlDumpFile.value.trim().length > 0;
+    
+    if (hasSqlFile) {
+        // Hide backup directory and backup file inputs
+        backupDirGroup.style.display = 'none';
+        backupFileGroup.style.display = 'none';
+    } else {
+        // Show backup directory and backup file inputs
+        backupDirGroup.style.display = 'block';
+        backupFileGroup.style.display = 'block';
     }
 }
 
@@ -548,6 +909,10 @@ function selectFromModal() {
         addIncludeFolder(displayPath);
     } else {
         document.getElementById(state.modalTargetInput).value = displayPath;
+        // If SQL dump file was selected, trigger toggle
+        if (state.modalTargetInput === 'restoreSqlDumpFile') {
+            toggleRestoreInputs();
+        }
     }
     
     closeFileBrowserModal();
@@ -584,16 +949,51 @@ function renderIncludeFolders() {
 // ============================================================================
 
 async function loadSavedConnections() {
+    const container = document.getElementById('savedConnectionsList');
+    
     try {
-        const response = await fetch('/api/connections');
+        // Show loading state
+        if (container) {
+            container.innerHTML = '<div class="loading-text">Loading connections...</div>';
+        }
+        
+        // Add timeout to prevent infinite loading
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        
+        const response = await fetch('/api/connections', {
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
         const data = await response.json();
         
         if (data.success) {
-            state.savedConnections = data.connections;
+            state.savedConnections = data.connections || [];
             renderSavedConnections();
+        } else {
+            // Handle case where success is false
+            state.savedConnections = [];
+            if (container) {
+                container.innerHTML = '<div class="no-connections">No saved connections yet</div>';
+            }
+            console.error('Failed to load connections:', data);
         }
     } catch (error) {
         console.error('Error loading connections:', error);
+        state.savedConnections = [];
+        if (container) {
+            if (error.name === 'AbortError') {
+                container.innerHTML = '<div class="no-connections">Connection timeout. Please check your network and refresh.</div>';
+            } else {
+                container.innerHTML = '<div class="no-connections">Error loading connections. Please refresh the page.</div>';
+            }
+        }
     }
 }
 
@@ -601,17 +1001,23 @@ function renderSavedConnections() {
     const container = document.getElementById('savedConnectionsList');
     const countBadge = document.getElementById('connectionCount');
     
+    if (!container) {
+        console.error('savedConnectionsList container not found');
+        return;
+    }
+    
     // Update connection count badge
     if (countBadge) {
         countBadge.textContent = state.savedConnections.length > 0 ? state.savedConnections.length : '';
     }
     
-    if (state.savedConnections.length === 0) {
+    if (!state.savedConnections || state.savedConnections.length === 0) {
         container.innerHTML = '<div class="no-connections">No saved connections yet</div>';
         return;
     }
     
-    container.innerHTML = state.savedConnections.map(conn => `
+    try {
+        container.innerHTML = state.savedConnections.map(conn => `
         <div class="saved-connection-item ${state.activeConnectionId === conn.id ? 'active' : ''}" 
              data-id="${conn.id}"
              onclick="selectConnection('${conn.id}')">
@@ -636,6 +1042,10 @@ function renderSavedConnections() {
             </div>
         </div>
     `).join('');
+    } catch (error) {
+        console.error('Error rendering connections:', error);
+        container.innerHTML = '<div class="no-connections">Error displaying connections</div>';
+    }
 }
 
 async function selectConnection(connId) {
@@ -676,6 +1086,11 @@ function openConnectionModal(editId = null) {
     const title = document.getElementById('connectionModalTitle');
     const saveBtn = document.getElementById('saveConnectionBtn');
     
+    if (!modal || !title || !saveBtn) {
+        console.error('Connection modal elements not found');
+        return;
+    }
+    
     state.editingConnectionId = editId;
     
     if (editId) {
@@ -707,7 +1122,10 @@ function openConnectionModal(editId = null) {
 }
 
 function closeConnectionModal() {
-    document.getElementById('saveConnectionModal').classList.remove('show');
+    const modal = document.getElementById('saveConnectionModal');
+    if (modal) {
+        modal.classList.remove('show');
+    }
     state.editingConnectionId = null;
 }
 
@@ -1007,6 +1425,44 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load saved connections
     loadSavedConnections();
     
+    // Initialize restore type (default to database-only)
+    switchRestoreType('database');
+    
+    // Handle SQL dump file selection - hide/show other inputs
+    const sqlDumpFileInput = document.getElementById('restoreSqlDumpFile');
+    if (sqlDumpFileInput) {
+        sqlDumpFileInput.addEventListener('input', () => {
+            toggleRestoreInputs();
+            updateStartButtonState();
+        });
+        sqlDumpFileInput.addEventListener('change', () => {
+            toggleRestoreInputs();
+            updateStartButtonState();
+        });
+    }
+    
+    // Add event listeners to restore form inputs to update button state
+    const restoreDatabaseInput = document.getElementById('restoreDatabase');
+    if (restoreDatabaseInput) {
+        restoreDatabaseInput.addEventListener('input', updateStartButtonState);
+        restoreDatabaseInput.addEventListener('change', updateStartButtonState);
+    }
+    
+    const targetProjectPathInput = document.getElementById('targetProjectPath');
+    if (targetProjectPathInput) {
+        targetProjectPathInput.addEventListener('input', updateStartButtonState);
+        targetProjectPathInput.addEventListener('change', updateStartButtonState);
+    }
+    
+    // Initialize restore inputs visibility
+    toggleRestoreInputs();
+    
+    // Initialize button state
+    updateStartButtonState();
+    
+    // Initialize file browser to restricted root
+    loadFileBrowser('', 'fileList', 'fileBrowserPath');
+    
     // Tab switching
     document.querySelectorAll('.tab').forEach(tab => {
         tab.addEventListener('click', () => switchTab(tab.dataset.tab));
@@ -1051,17 +1507,100 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('downloadLogs').addEventListener('click', downloadLogs);
     
     // File browser navigation
-    document.getElementById('fileBrowserBack').addEventListener('click', () => {
-        navigateBack('fileList', 'fileBrowserPath');
-    });
+    const fileBrowserBackBtn = document.getElementById('fileBrowserBack');
+    if (fileBrowserBackBtn) {
+        fileBrowserBackBtn.addEventListener('click', () => {
+            navigateBack('fileList', 'fileBrowserPath');
+        });
+    } else {
+        console.error('fileBrowserBack button not found');
+    }
     document.getElementById('fileBrowserRefresh').addEventListener('click', () => {
-        loadFileBrowser(state.fileBrowserPath);
+        const search = document.getElementById('fileBrowserSearch')?.value || '';
+        loadFileBrowser(state.fileBrowserPath, 'fileList', 'fileBrowserPath', search);
     });
+    const fileBrowserCreateBtn = document.getElementById('fileBrowserCreateFolder');
+    if (fileBrowserCreateBtn) {
+        fileBrowserCreateBtn.addEventListener('click', () => {
+            openCreateFolderModal('fileList', 'fileBrowserPath');
+        });
+    } else {
+        console.error('fileBrowserCreateFolder button not found');
+    }
     
-    // Modal file browser
-    document.getElementById('modalBrowserBack').addEventListener('click', () => {
-        navigateBack('modalFileList', 'modalBrowserPath');
-    });
+    // File browser search (main browser)
+    const fileSearchInput = document.getElementById('fileBrowserSearch');
+    if (fileSearchInput) {
+        fileSearchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                loadFileBrowser(state.fileBrowserPath, 'fileList', 'fileBrowserPath', e.target.value);
+            }, 300);
+        });
+    }
+    
+    // File browser search (modal browser)
+    const modalSearchInput = document.getElementById('modalBrowserSearch');
+    if (modalSearchInput) {
+        modalSearchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                loadFileBrowser(state.modalFileBrowserPath, 'modalFileList', 'modalBrowserPath', e.target.value);
+            }, 300);
+        });
+    }
+    
+    // Modal file browser back button
+    const modalBrowserBackBtn = document.getElementById('modalBrowserBack');
+    if (modalBrowserBackBtn) {
+        modalBrowserBackBtn.addEventListener('click', () => {
+            navigateBack('modalFileList', 'modalBrowserPath');
+        });
+    } else {
+        console.error('modalBrowserBack button not found');
+    }
+    
+    // Modal file browser create folder button
+    const modalBrowserCreateBtn = document.getElementById('modalBrowserCreateFolder');
+    if (modalBrowserCreateBtn) {
+        modalBrowserCreateBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log('Create folder button clicked in modal');
+            openCreateFolderModal('modalFileList', 'modalBrowserPath');
+        });
+        console.log('Modal create folder button listener attached');
+    } else {
+        console.error('modalBrowserCreateFolder button not found');
+    }
+    
+    // Create folder modal confirm button
+    const createFolderConfirmBtn = document.getElementById('createFolderConfirmBtn');
+    if (createFolderConfirmBtn) {
+        createFolderConfirmBtn.addEventListener('click', createFolder);
+    }
+    
+    // Create folder modal - Enter key support
+    const folderNameInput = document.getElementById('folderNameInput');
+    if (folderNameInput) {
+        folderNameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                createFolder();
+            }
+        });
+    }
+    
+    // Close modal on backdrop click
+    const createFolderModal = document.getElementById('createFolderModal');
+    if (createFolderModal) {
+        createFolderModal.addEventListener('click', (e) => {
+            if (e.target === createFolderModal) {
+                closeCreateFolderModal();
+            }
+        });
+    }
+    
+    // Modal file browser select button
     document.getElementById('modalSelectBtn').addEventListener('click', selectFromModal);
     
     // Close modal on backdrop click

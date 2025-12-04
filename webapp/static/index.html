@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PostgreSQL Backup Manager</title>
+    <title>PG Backup Manager</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=3.0">
 </head>
 <body>
     <div class="app">
@@ -19,7 +19,7 @@
                         <path d="M16 2C8.268 2 2 8.268 2 16s6.268 14 14 14 14-6.268 14-14S23.732 2 16 2z" fill="#336791"/>
                         <path d="M16 6c-5.523 0-10 4.477-10 10s4.477 10 10 10 10-4.477 10-10S21.523 6 16 6zm0 2c1.657 0 3 1.343 3 3v2h-6v-2c0-1.657 1.343-3 3-3zm-4 7h8v6c0 1.105-.895 2-2 2h-4c-1.105 0-2-.895-2-2v-6z" fill="#fff"/>
                     </svg>
-                    <span>PostgreSQL Backup Manager</span>
+                    <span>PG Backup Manager</span>
                 </div>
             </div>
             <div class="header-right">
@@ -68,7 +68,7 @@
                 </section>
 
                 <!-- Connection Section -->
-                <section class="section">
+                <section class="section" id="connectionSection">
                     <h2 class="section-title">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
@@ -152,7 +152,7 @@
                         <div class="form-group">
                             <label>Backup Directory</label>
                             <div class="input-with-button">
-                                <input type="text" id="backupDir" value="/tmp/postgres-backups" placeholder="/tmp/postgres-backups">
+                                <input type="text" id="backupDir" value="/tmp/db-backups" placeholder="/tmp/db-backups">
                                 <button class="btn btn-icon" onclick="openFileBrowser('backupDir', true)">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -172,14 +172,6 @@
                             </div>
                             <span class="hint">Optional: Backup entire project folder with all subfolders</span>
                         </div>
-                        <div class="form-group">
-                            <label>Include Folders (Legacy)</label>
-                            <div class="tags-input" id="includeFolders">
-                                <div class="tags-container"></div>
-                                <button class="btn btn-sm" onclick="openFileBrowser('includeFolders', true)">+ Add Folder</button>
-                            </div>
-                            <span class="hint">Legacy: Use Project Path instead for full project backup</span>
-                        </div>
                     </div>
                 </section>
 
@@ -193,84 +185,158 @@
                         </svg>
                         Restore Configuration
                     </h2>
-                    <div class="form-stack">
-                        <div class="form-group">
-                            <label>Database Name <span class="required">*</span></label>
-                            <input type="text" id="restoreDatabase" placeholder="Required - database to restore">
-                        </div>
-                        <div class="form-group">
-                            <label>Backup Directory</label>
-                            <div class="input-with-button">
-                                <input type="text" id="restoreBackupDir" value="/tmp/postgres-backups" placeholder="/tmp/postgres-backups">
-                                <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupDir', true)">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                                    </svg>
-                                </button>
+                    
+                    <!-- Restore Type Tabs -->
+                    <div class="restore-type-tabs">
+                        <button class="restore-type-tab active" data-restore-type="database" onclick="switchRestoreType('database')">Database Only</button>
+                        <button class="restore-type-tab" data-restore-type="project" onclick="switchRestoreType('project')">Full Project</button>
+                    </div>
+                    
+                    <!-- Database Only Restore -->
+                    <div class="restore-type-content active" id="restore-database-only">
+                        <div class="form-stack">
+                            <div class="restore-section-header">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                                </svg>
+                                <span>Restore a single database using the connection above</span>
+                            </div>
+                            <div class="form-group">
+                                <label>Database Name <span class="required">*</span></label>
+                                <input type="text" id="restoreDatabase" placeholder="e.g., my_database" autocomplete="off">
+                                <span class="hint">The name of the database to restore (required)</span>
+                            </div>
+                            <div class="form-group" id="restoreBackupDirGroup">
+                                <label>Backup Directory</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="restoreBackupDir" value="/tmp/db-backups" placeholder="/tmp/db-backups" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupDir', true)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Directory containing backup files</span>
+                            </div>
+                            <div class="form-group" id="restoreBackupFileGroup">
+                                <label>Backup File</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="restoreBackupFile" placeholder="Optional - leave empty for latest" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupFile', false)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Specific backup session directory (optional - uses latest if empty)</span>
+                            </div>
+                            <div class="form-group">
+                                <label>SQL Dump File</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="restoreSqlDumpFile" placeholder="Optional - specific SQL dump file to restore" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('restoreSqlDumpFile', false)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                            <polyline points="14,2 14,8 20,8"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Direct path to a SQL dump file (e.g., /path/to/database.sql). If specified, backup directory and backup file inputs will be hidden.</span>
+                            </div>
+                            <div class="checkbox-group">
+                                <label class="checkbox">
+                                    <input type="checkbox" id="dropExisting" checked>
+                                    <span class="checkmark"></span>
+                                    Drop existing database before restore
+                                </label>
+                                <span class="hint">If checked, the existing database will be dropped and recreated</span>
+                            </div>
+                            <div class="checkbox-group">
+                                <label class="checkbox">
+                                    <input type="checkbox" id="ignoreErrors">
+                                    <span class="checkmark"></span>
+                                    Ignore errors during restore
+                                </label>
+                                <span class="hint">Continue restore even if errors occur (e.g., duplicate constraints). Useful for problematic dump files.</span>
                             </div>
                         </div>
-                        <div class="form-group">
-                            <label>Backup File</label>
-                            <div class="input-with-button">
-                                <input type="text" id="restoreBackupFile" placeholder="Optional - uses latest if empty">
-                                <button class="btn btn-icon" onclick="openFileBrowser('restoreBackupFile', false)">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                                        <polyline points="14,2 14,8 20,8"/>
-                                    </svg>
-                                </button>
+                    </div>
+                    
+                    <!-- Full Project Restore -->
+                    <div class="restore-type-content" id="restore-full-project">
+                        <div class="form-stack">
+                            <div class="restore-section-header">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                                </svg>
+                                <span>Restore entire project (files + databases) - uses .env for database connection</span>
                             </div>
-                        </div>
-                        <div class="form-group">
-                            <label>Restore Type</label>
-                            <div class="segmented-control" id="restoreTypeControl">
-                                <button class="segment active" data-value="database" onclick="changeRestoreType('database')">Database Only</button>
-                                <button class="segment" data-value="project" onclick="changeRestoreType('project')">Full Project</button>
+                            <div class="form-group">
+                                <label>Target Project Path <span class="required">*</span></label>
+                                <div class="input-with-button">
+                                    <input type="text" id="targetProjectPath" placeholder="e.g., /home/user/my-project" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('targetProjectPath', true)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Where to restore the project files. Database connection will be read from the project's .env file.</span>
                             </div>
-                        </div>
-                        <div class="checkbox-group">
-                            <label class="checkbox">
-                                <input type="checkbox" id="dropExisting" checked>
-                                <span class="checkmark"></span>
-                                Drop existing database before restore
-                            </label>
-                            <label class="checkbox" id="skipFilestoreCheckbox">
-                                <input type="checkbox" id="skipFilestore">
-                                <span class="checkmark"></span>
-                                Skip filestore restoration
-                            </label>
-                            <label class="checkbox" id="skipDatabaseCheckbox" style="display: none;">
-                                <input type="checkbox" id="skipDatabase">
-                                <span class="checkmark"></span>
-                                Skip database restoration (project only)
-                            </label>
-                        </div>
-                        <div class="form-group" id="targetProjectPathGroup" style="display: none;">
-                            <label>Target Project Path <span class="required">*</span></label>
-                            <div class="input-with-button">
-                                <input type="text" id="targetProjectPath" placeholder="Path where project should be restored">
-                                <button class="btn btn-icon" onclick="openFileBrowser('targetProjectPath', true)">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                                    </svg>
-                                </button>
+                            <div class="form-group">
+                                <label>Backup Directory</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="restoreProjectBackupDir" value="/tmp/db-backups" placeholder="/tmp/db-backups" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('restoreProjectBackupDir', true)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Directory containing the project backup</span>
                             </div>
-                            <span class="hint">Required for project restore</span>
-                        </div>
-                        <div class="form-group" id="postRestoreCommandsGroup" style="display: none;">
-                            <label>Post-Restore Commands</label>
-                            <textarea id="postRestoreCommands" rows="4" placeholder="Enter commands to run sequentially after restore (one per line)&#10;Example:&#10;docker-compose up -d&#10;sleep 10&#10;python restore_database.py"></textarea>
-                            <span class="hint">Commands will be executed sequentially in the project directory</span>
-                        </div>
-                        <div class="form-group" id="filestorePathGroup">
-                            <label>Filestore Path</label>
-                            <div class="input-with-button">
-                                <input type="text" id="filestorePath" placeholder="Optional - auto-detected if empty">
-                                <button class="btn btn-icon" onclick="openFileBrowser('filestorePath', true)">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                                    </svg>
-                                </button>
+                            <div class="form-group">
+                                <label>Backup File</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="restoreProjectBackupFile" placeholder="Optional - leave empty for latest" autocomplete="off">
+                                    <button class="btn btn-icon" onclick="openFileBrowser('restoreProjectBackupFile', false)">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                            <polyline points="14,2 14,8 20,8"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <span class="hint">Specific backup session (optional - uses latest if empty)</span>
+                            </div>
+                            <div class="form-group">
+                                <label>Database Name</label>
+                                <input type="text" id="restoreProjectDatabase" placeholder="Optional - leave empty to restore all databases" autocomplete="off">
+                                <span class="hint">If specified, only this database will be restored. If empty, all databases from the backup will be restored.</span>
+                            </div>
+                            <div class="form-group">
+                                <label>Post-Restore Commands</label>
+                                <textarea id="postRestoreCommands" rows="4" placeholder="Commands to run after restore (one per line)&#10;&#10;Example:&#10;docker-compose up -d&#10;sleep 10&#10;python manage.py migrate" autocomplete="off"></textarea>
+                                <span class="hint">These commands will run sequentially in the restored project directory after files are copied</span>
+                            </div>
+                            <div class="checkbox-group">
+                                <label class="checkbox">
+                                    <input type="checkbox" id="skipDatabase">
+                                    <span class="checkmark"></span>
+                                    Skip database restoration (restore files only)
+                                </label>
+                                <span class="hint">If checked, only project files will be restored, no database operations will be performed</span>
+                            </div>
+                            <div class="checkbox-group">
+                                <label class="checkbox">
+                                    <input type="checkbox" id="ignoreErrorsProject">
+                                    <span class="checkmark"></span>
+                                    Ignore errors during restore
+                                </label>
+                                <span class="hint">Continue restore even if errors occur (e.g., duplicate constraints). Useful for problematic dump files.</span>
                             </div>
                         </div>
                     </div>
@@ -368,18 +434,34 @@
                     </h2>
                     <div class="file-browser" id="fileBrowser">
                         <div class="file-browser-header">
-                            <button class="btn btn-icon" id="fileBrowserBack" disabled>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="15,18 9,12 15,6"/>
-                                </svg>
-                            </button>
-                            <input type="text" id="fileBrowserPath" value="/host" readonly>
-                            <button class="btn btn-icon" id="fileBrowserRefresh">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="23,4 23,10 17,10"/>
-                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                                </svg>
-                            </button>
+                            <div class="file-browser-nav">
+                                <button class="btn btn-icon" id="fileBrowserBack" disabled>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="15,18 9,12 15,6"/>
+                                    </svg>
+                                </button>
+                                <input type="text" id="fileBrowserPath" value="" readonly>
+                            </div>
+                            <div class="file-browser-tools">
+                                <div class="search-input">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="11" cy="11" r="8"/>
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                    </svg>
+                                    <input type="text" id="fileBrowserSearch" placeholder="Search...">
+                                </div>
+                                <button class="btn btn-icon" id="fileBrowserCreateFolder" title="Create New Folder">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 5v14M5 12h14"/>
+                                    </svg>
+                                </button>
+                                <button class="btn btn-icon" id="fileBrowserRefresh" title="Refresh">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23,4 23,10 17,10"/>
+                                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                    </svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="file-list" id="fileList">
                             <div class="file-list-loading">Loading...</div>
@@ -506,12 +588,28 @@
                 <div class="modal-body">
                     <div class="file-browser-modal">
                         <div class="file-browser-header">
-                            <button class="btn btn-icon" id="modalBrowserBack" disabled>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="15,18 9,12 15,6"/>
-                                </svg>
-                            </button>
-                            <input type="text" id="modalBrowserPath" value="/host" readonly>
+                            <div class="file-browser-nav">
+                                <button class="btn btn-icon" id="modalBrowserBack" disabled>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="15,18 9,12 15,6"/>
+                                    </svg>
+                                </button>
+                                <input type="text" id="modalBrowserPath" value="" readonly>
+                            </div>
+                            <div class="file-browser-tools">
+                                <div class="search-input">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="11" cy="11" r="8"/>
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                    </svg>
+                                    <input type="text" id="modalBrowserSearch" placeholder="Search...">
+                                </div>
+                                <button class="btn btn-icon" id="modalBrowserCreateFolder" title="Create New Folder">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 5v14M5 12h14"/>
+                                    </svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="file-list" id="modalFileList">
                             <div class="file-list-loading">Loading...</div>
@@ -525,11 +623,36 @@
             </div>
         </div>
 
+        <!-- Create Folder Modal -->
+        <div class="modal" id="createFolderModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Create New Folder</h3>
+                    <button class="btn btn-icon modal-close" onclick="closeCreateFolderModal()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Folder Name <span class="required">*</span></label>
+                        <input type="text" id="folderNameInput" placeholder="Enter folder name" autofocus>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeCreateFolderModal()">Cancel</button>
+                    <button class="btn btn-primary" id="createFolderConfirmBtn">Create</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Toast Container -->
         <div class="toast-container" id="toastContainer"></div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=3.0"></script>
 </body>
 </html>
 

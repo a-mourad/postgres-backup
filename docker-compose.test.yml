@@ -1,0 +1,59 @@
+# PostgreSQL Backup Manager - Test Setup with PostgreSQL Container
+# 
+# This setup includes a test PostgreSQL database for end-to-end testing
+# 
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#   docker-compose -f docker-compose.yml -f docker-compose.test.yml logs -f
+#   docker-compose -f docker-compose.yml -f docker-compose.test.yml down
+#
+# Test database connection:
+#   Host: test-postgres
+#   Port: 5432
+#   Username: testuser
+#   Password: testpass
+#   Database: testdb
+# ============================================================================
+
+version: '3.8'
+
+services:
+  # Test PostgreSQL Database
+  test-postgres:
+    image: postgres:16
+    container_name: test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5433:5432"  # Use different port to avoid conflicts
+    volumes:
+      - test_postgres_data:/var/lib/postgresql/data
+      - ./test/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backup-network
+
+  # Update main service to connect to test database
+  pg-backup-manager:
+    networks:
+      - backup-network
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+
+volumes:
+  test_postgres_data:
+    driver: local
+
+networks:
+  backup-network:
+    driver: bridge
+

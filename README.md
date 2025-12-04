@@ -178,7 +178,7 @@ sudo ./run.sh --action=restore \
 |----------|-------------|----------|---------|
 | `--action` | Operation to perform: `backup` or `restore` | ✅ | - |
 | `--database` | Database name to backup/restore | ❌ | All databases (backup only) |
-| `--backup-dir` | Local backup directory | ❌ | `/tmp/postgres-backups` |
+| `--backup-dir` | Local backup directory | ❌ | `/tmp/db-backups` |
 | `--backup-file` | Specific backup file for restore | ❌ | Latest backup |
 
 ### Database Connection

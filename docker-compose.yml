@@ -1,5 +1,3 @@
-<<<<<<< Current (Your changes)
-=======
 # PostgreSQL Backup Manager - Docker Compose Configuration
 # 
 # ============================================================================
@@ -21,7 +19,7 @@
 version: '3.8'
 
 services:
-  postgres-backup-manager:
+  pg-backup-manager:
     build:
       context: .
       dockerfile: Dockerfile
@@ -32,6 +30,11 @@ services:
     # Mount the host filesystem for backup access
     # The container reads/writes backups through these mounts
     volumes:
+      # DEVELOPMENT: Mount source code for hot-reload (comment out in production)
+      # This allows code changes without rebuilding the container
+      - ./backup_script.py:/app/backup_script.py:ro
+      - ./webapp:/app/webapp:ro
+      
       # Mount host root filesystem (read-write for backup operations)
       - /:/host:rw
       
@@ -56,11 +59,15 @@ services:
     ports:
       - "6536:6536"
     
+    # Override CMD to enable hot-reload for development
+    # Remove this in production or set command: [] to use Dockerfile CMD
+    command: ["python", "-m", "uvicorn", "webapp.app:app", "--host", "0.0.0.0", "--port", "6536", "--reload"]
+    
     environment:
       # Application settings
       - BACKUP_SCRIPT_PATH=/app/backup_script.py
       - HOST_ROOT=/host
-      - DEFAULT_BACKUP_DIR=/host/tmp/postgres-backups
+      - DEFAULT_BACKUP_DIR=/host/tmp/db-backups
       # Host UID/GID for file ownership (adjust if your user has different UID/GID)
       - HOST_UID=1000
       - HOST_GID=1000
@@ -112,4 +119,7 @@ volumes:
   connections_data:
     driver: local
 
->>>>>>> Incoming (Background Agent changes)
+networks:
+  default:
+    name: backup-network
+    driver: bridge

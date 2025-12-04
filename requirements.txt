@@ -1,0 +1,10 @@
+# PostgreSQL Backup Script Dependencies
+
+# Database
+psycopg2-binary>=2.9.0
+
+# Cloud Storage
+boto3>=1.28.0
+minio>=7.1.0
+google-cloud-storage>=2.10.0
+

@@ -552,6 +552,122 @@ input:focus {
     display: block;
 }
 
+/* Restore Type Tabs - Elegant Design */
+.restore-type-tabs {
+    display: inline-flex;
+    gap: 0;
+    margin: 0 20px 24px 20px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    padding: 6px;
+    border: 2px solid var(--border-color);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.restore-type-tab {
+    flex: 1;
+    min-width: 140px;
+    padding: 12px 28px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    white-space: nowrap;
+}
+
+.restore-type-tab:hover:not(.active) {
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+}
+
+.restore-type-tab.active {
+    background: linear-gradient(135deg, var(--accent-primary) 0%, #00b894 100%);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 212, 170, 0.3), 0 2px 4px rgba(0, 212, 170, 0.2);
+    transform: translateY(-1px);
+}
+
+.restore-type-tab.active::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: var(--radius-md);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0) 100%);
+    pointer-events: none;
+}
+
+.restore-type-content {
+    display: none;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    pointer-events: none;
+}
+
+.restore-type-content.active {
+    display: block;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+    animation: fadeIn 0.3s ease-in;
+}
+
+/* Hide connection section when Full Project is selected */
+#connectionSection[hidden],
+#connectionSection.hidden {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+}
+
+.restore-section-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent-primary);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.restore-section-header svg {
+    flex-shrink: 0;
+    color: var(--accent-primary);
+}
+
+.restore-section-header span {
+    line-height: 1.4;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 /* Segmented Control */
 .segmented-control {
     display: flex;
@@ -694,15 +810,63 @@ input:focus {
 
 .file-browser-header {
     display: flex;
+    flex-direction: column;
     gap: 8px;
     padding: 10px;
     background: var(--bg-tertiary);
     border-bottom: 1px solid var(--border-color);
 }
 
-.file-browser-header input {
+.file-browser-nav {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.file-browser-nav input {
     flex: 1;
     background: var(--bg-secondary);
+}
+
+.file-browser-tools {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.search-input {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+}
+
+.search-input svg {
+    opacity: 0.6;
+    flex-shrink: 0;
+}
+
+.search-input input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    padding: 0;
+}
+
+.search-input input::placeholder {
+    color: var(--text-muted);
+}
+
+.search-input:focus-within {
+    border-color: var(--border-focus);
 }
 
 .file-list {

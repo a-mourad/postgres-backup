@@ -72,7 +72,7 @@ RUN mkdir -p /host /backups /app/data
 # Set environment variables for the app
 ENV BACKUP_SCRIPT_PATH=/app/backup_script.py \
     HOST_ROOT=/host \
-    DEFAULT_BACKUP_DIR=/host/tmp/postgres-backups \
+    DEFAULT_BACKUP_DIR=/host/tmp/db-backups \
     CONNECTIONS_FILE=/app/data/connections.json
 
 # Expose port

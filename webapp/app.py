@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PostgreSQL Backup Manager - Web Application
+PG Backup Manager - Web Application
 A modern web interface for PostgreSQL backup/restore operations with full host access.
 """
 
@@ -12,14 +12,14 @@ import subprocess
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 # ============================================================================
 # Configuration
@@ -29,7 +29,7 @@ from pydantic import BaseModel
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKUP_SCRIPT_PATH = os.environ.get("BACKUP_SCRIPT_PATH", "/app/backup_script.py")
 HOST_ROOT = os.environ.get("HOST_ROOT", "/host")  # Root filesystem mount point
-DEFAULT_BACKUP_DIR = os.environ.get("DEFAULT_BACKUP_DIR", "/host/tmp/postgres-backups")
+DEFAULT_BACKUP_DIR = os.environ.get("DEFAULT_BACKUP_DIR", "/host/tmp/db-backups")
 # Use local data directory instead of /app
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 CONNECTIONS_FILE = os.environ.get("CONNECTIONS_FILE", "/app/data/connections.json")
@@ -248,17 +248,17 @@ class BackupRequest(BaseModel):
 
 
 class RestoreRequest(BaseModel):
-    connection: ConnectionConfig
-    database: str
+    connection: Optional[ConnectionConfig] = None  # Optional for project restore
+    database: Optional[str] = None  # Optional - if None, restore all databases
     backup_dir: str = DEFAULT_BACKUP_DIR
     backup_file: Optional[str] = None
+    sql_dump_file: Optional[str] = None  # Optional - specific SQL dump file to restore
     drop_existing: bool = True
-    skip_filestore: bool = False
-    filestore_path: Optional[str] = None
     restore_type: str = "database"  # "database" or "project"
     target_project_path: Optional[str] = None
     skip_database: bool = False
     post_restore_commands: Optional[List[str]] = None
+    ignore_errors: bool = False  # Continue restore even if errors occur (e.g. duplicate constraints)
 
 
 class TestConnectionRequest(BaseModel):
@@ -344,7 +344,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PostgreSQL Backup Manager",
+    title="PG Backup Manager",
     description="Web-based PostgreSQL backup and restore utility",
     version="2.0.0",
     lifespan=lifespan
@@ -359,10 +359,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
+# Mount static files with no-cache headers for development
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    from fastapi.responses import Response
+    from starlette.staticfiles import StaticFiles as StarletteStaticFiles
+    
+    class NoCacheStaticFiles(StarletteStaticFiles):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+        
+        async def __call__(self, scope, receive, send):
+            async def send_wrapper(message):
+                if message["type"] == "http.response.start":
+                    # Add no-cache headers
+                    headers = dict(message.get("headers", []))
+                    headers[b"cache-control"] = b"no-cache, no-store, must-revalidate"
+                    headers[b"pragma"] = b"no-cache"
+                    headers[b"expires"] = b"0"
+                    message["headers"] = list(headers.items())
+                await send(message)
+            
+            await super().__call__(scope, receive, send_wrapper)
+    
+    app.mount("/static", NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
 
 # ============================================================================
@@ -536,17 +556,18 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
     """Build restore command from request."""
     cmd = ["python", BACKUP_SCRIPT_PATH, "--action", "restore"]
     
-    # Connection params - only added if restore_type is 'database' or as fallback
-    # For project restore, these might be overridden by .env file parsing in the script,
-    # but we pass them anyway as defaults/initial connection
-    cmd.extend(["--host", request.connection.host])
-    cmd.extend(["--port", str(request.connection.port)])
-    cmd.extend(["--username", request.connection.username])
-    if request.connection.password:
-        cmd.extend(["--password", request.connection.password])
+    # Connection params - only added for database-only restore
+    # For project restore, connection comes from .env file
+    if request.restore_type == "database" and request.connection:
+        cmd.extend(["--host", request.connection.host])
+        cmd.extend(["--port", str(request.connection.port)])
+        cmd.extend(["--username", request.connection.username])
+        if request.connection.password:
+            cmd.extend(["--password", request.connection.password])
     
-    # Restore params
-    cmd.extend(["--database", request.database])
+    # Database - optional, if None will restore all databases
+    if request.database:
+        cmd.extend(["--database", request.database])
     
     # Normalize backup directory path
     backup_dir = normalize_path(request.backup_dir)
@@ -558,8 +579,14 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
     if request.backup_file:
         cmd.extend(["--backup-file", normalize_path(request.backup_file)])
     
+    if request.sql_dump_file:
+        cmd.extend(["--sql-dump-file", normalize_path(request.sql_dump_file)])
+    
     if request.drop_existing:
         cmd.append("--drop-existing")
+    
+    if request.ignore_errors:
+        cmd.append("--ignore-errors")
     
     if request.restore_type == "project":
         # Project restore
@@ -570,12 +597,6 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
         if request.post_restore_commands:
             cmd.append("--post-restore-commands")
             cmd.extend(request.post_restore_commands)
-    else:
-        # Database-only restore (legacy)
-        if request.skip_filestore:
-            cmd.append("--skip-filestore")
-        if request.filestore_path:
-            cmd.extend(["--filestore-path", normalize_path(request.filestore_path)])
     
     return cmd
 
@@ -589,8 +610,23 @@ async def root():
     """Serve the main application page."""
     index_path = static_dir / "index.html"
     if index_path.exists():
-        return FileResponse(index_path)
-    return HTMLResponse("<h1>PostgreSQL Backup Manager</h1><p>Static files not found.</p>")
+        # Read and inject timestamp into HTML for cache-busting
+        content = index_path.read_text()
+        import time
+        timestamp = int(time.time())
+        # Inject timestamp into CSS and JS URLs (handle both with and without version)
+        import re
+        content = re.sub(r'styles\.css(\?v=[^"]*)?', f'styles.css?v=3.0&t={timestamp}', content)
+        content = re.sub(r'app\.js(\?v=[^"]*)?', f'app.js?v=3.0&t={timestamp}', content)
+        response = HTMLResponse(content)
+        # Add aggressive cache-busting headers
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        response.headers["Last-Modified"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+        response.headers["ETag"] = f'"{timestamp}"'
+        return response
+    return HTMLResponse("<h1>PG Backup Manager</h1><p>Static files not found.</p>")
 
 
 @app.get("/api/status")
@@ -607,7 +643,7 @@ async def get_config():
     """Get application configuration."""
     return {
         "host_root": HOST_ROOT,
-        "default_backup_dir": "/tmp/postgres-backups",  # Host-relative path
+        "default_backup_dir": "/tmp/db-backups",  # Host-relative path
         "is_docker": os.path.exists("/.dockerenv")
     }
 
@@ -854,13 +890,63 @@ async def start_backup(request: BackupRequest, background_tasks: BackgroundTasks
 
 
 @app.post("/api/restore")
-async def start_restore(request: RestoreRequest, background_tasks: BackgroundTasks):
+async def start_restore(http_request: Request, background_tasks: BackgroundTasks = BackgroundTasks()):
     """Start a restore operation."""
     if current_operation["running"]:
         raise HTTPException(status_code=409, detail="An operation is already running")
     
-    if not request.database:
-        raise HTTPException(status_code=400, detail="Database name is required for restore")
+    # Parse JSON body manually to avoid FastAPI's automatic validation
+    try:
+        request_data = await http_request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    
+    # Create request object with defaults for optional fields
+    # Add None defaults for optional fields if not present
+    if "connection" not in request_data:
+        request_data["connection"] = None
+    if "database" not in request_data:
+        request_data["database"] = None
+    if "backup_file" not in request_data:
+        request_data["backup_file"] = None
+    if "target_project_path" not in request_data:
+        request_data["target_project_path"] = None
+    if "post_restore_commands" not in request_data:
+        request_data["post_restore_commands"] = None
+    
+    # Handle connection - if it's None, keep it None, otherwise create ConnectionConfig
+    connection_obj = None
+    if request_data.get("connection") is not None and isinstance(request_data["connection"], dict):
+        try:
+            connection_obj = ConnectionConfig(**request_data["connection"])
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid connection config: {str(e)}")
+    
+    # Create RestoreRequest manually to avoid Pydantic validation issues
+    request = RestoreRequest(
+        restore_type=request_data.get("restore_type", "database"),
+        backup_dir=request_data.get("backup_dir", DEFAULT_BACKUP_DIR),
+        backup_file=request_data.get("backup_file"),
+        sql_dump_file=request_data.get("sql_dump_file"),
+        drop_existing=request_data.get("drop_existing", True),
+        target_project_path=request_data.get("target_project_path"),
+        skip_database=request_data.get("skip_database", False),
+        post_restore_commands=request_data.get("post_restore_commands"),
+        connection=connection_obj,
+        database=request_data.get("database")
+    )
+    
+    # Database name required only for database-only restore (unless sql_dump_file is provided)
+    if request.restore_type == "database" and not request.database and not request.sql_dump_file:
+        raise HTTPException(status_code=400, detail="Database name is required for database-only restore (or provide sql_dump_file)")
+    
+    # Connection required only for database-only restore
+    if request.restore_type == "database" and not request.connection:
+        raise HTTPException(status_code=400, detail="Database connection is required for database-only restore")
+    
+    # Target project path required for project restore
+    if request.restore_type == "project" and not request.target_project_path:
+        raise HTTPException(status_code=400, detail="Target project path is required for project restore")
     
     cmd = build_restore_command(request)
     background_tasks.add_task(run_backup_command, cmd, "restore")
@@ -882,42 +968,42 @@ async def stop_operation():
 # ============================================================================
 
 @app.get("/api/files/browse")
-async def browse_files(path: str = "/host"):
-    """Browse files and directories from the host machine only."""
+async def browse_files(path: str = "", search: Optional[str] = None):
+    """
+    Browse files and directories.
+    Restricts view to /host/host_mnt if it exists, acting as the root.
+    """
     try:
-        # Always start from /host (host filesystem)
-        # Normalize the path to always be relative to /host
-        if path == "/" or path == "":
-            path = "/host"
+        # Determine effective root
+        # Check if /host/host_mnt exists (Docker Desktop/WSL pattern)
+        # If it does, treat it as the restricted root.
+        restricted_root = "/host/host_mnt" if os.path.exists(os.path.join(HOST_ROOT, "host_mnt")) else "/host"
         
-        # If path doesn't start with /host, prepend it
+        # Normalize incoming path
+        if not path or path == "/":
+            path = restricted_root
+        
+        # Ensure path starts with /host (security/sanity check)
         if not path.startswith("/host"):
-            # If it's an absolute path, make it relative to /host
-            if path.startswith("/"):
-                path = "/host" + path
-            else:
-                path = "/host/" + path
+             # If it's a relative path or absolute path not starting with /host
+             if path.startswith("/"):
+                 # Try to prepend /host if likely intended
+                 path = "/host" + path
+             else:
+                 path = os.path.join("/host", path)
         
-        # Map to actual host filesystem path
-        # HOST_ROOT is /host (the mount point)
-        # When path is /host, we want to browse HOST_ROOT directly
-        # When path is /host/something, we want to browse HOST_ROOT/something
-        if path == "/host":
-            actual_path = HOST_ROOT
-        else:
-            # Remove /host prefix to get relative path
-            host_relative = path[5:] if path.startswith("/host") else path
-            # Ensure it starts with / for proper joining
-            if not host_relative.startswith("/"):
-                host_relative = "/" + host_relative
-            # Join with HOST_ROOT
-            if HOST_ROOT == "/host":
-                actual_path = HOST_ROOT + host_relative
-            else:
-                actual_path = os.path.join(HOST_ROOT, host_relative.lstrip("/"))
+        # Enforce restriction: cannot go above restricted_root
+        if not path.startswith(restricted_root):
+            path = restricted_root
+
+        # Map to actual filesystem path
+        # HOST_ROOT is /host.
+        # path is /host/host_mnt/some/dir
+        # actual_path should be /host/host_mnt/some/dir (since HOST_ROOT is mount point)
         
-        # Debug: Log the actual path being browsed
-        # print(f"DEBUG: path={path}, HOST_ROOT={HOST_ROOT}, actual_path={actual_path}", file=sys.stderr)
+        # We can just use the path directly if it starts with /host, as /host IS the mount point in container.
+        # But we need to handle the case where path might have double slashes etc.
+        actual_path = os.path.normpath(path)
         
         if not os.path.exists(actual_path):
             return {"success": False, "error": f"Path does not exist: {actual_path}", "items": []}
@@ -927,73 +1013,134 @@ async def browse_files(path: str = "/host"):
         
         items = []
         try:
-            for entry in os.scandir(actual_path):
+            # Use listdir and manual stat to avoid keeping file handles open
+            entries = []
+            try:
+                for name in os.listdir(actual_path):
+                    entry_path = os.path.join(actual_path, name)
+                    entries.append((name, entry_path))
+            except PermissionError:
+                return {"success": False, "error": "Permission denied", "items": []}
+            
+            for name, entry_path in entries:
+                # Filter out filesystem/system directories that users don't need to see
+                # Keep user-relevant directories like home, tmp, opt, mnt, media
+                system_dirs = {
+                    'proc', 'sys', 'dev', 'run', 'boot', 'lib', 'lib64', 
+                    'usr', 'var', 'etc', 'root', 'sbin', 'bin', 'srv',
+                    'snap', 'lost+found', 'sysroot'
+                }
+                if name in system_dirs:
+                    continue
+                
+                # Filter by search term if provided
+                if search and search.lower() not in name.lower():
+                    continue
+                
                 try:
-                    # Use lstat() for symlinks to avoid following broken symlinks
-                    # Use stat() for regular files/directories
-                    if entry.is_symlink():
-                        stat = entry.stat(follow_symlinks=False)
-                    else:
-                        stat = entry.stat()
-                    # Build path with /host prefix for display
-                    if path == "/host":
-                        item_path = f"/host/{entry.name}"
-                    else:
-                        item_path = f"{path}/{entry.name}" if path.endswith("/") else f"{path}/{entry.name}"
+                    # Use lstat to avoid following symlinks (prevents opening files)
+                    stat_info = os.lstat(entry_path)
+                    is_dir = os.path.isdir(entry_path) and not os.path.islink(entry_path)
+                    is_link = os.path.islink(entry_path)
+                    
                     items.append({
-                        "name": entry.name,
-                        "path": item_path,
-                        "is_dir": entry.is_dir(follow_symlinks=False),
-                        "is_symlink": entry.is_symlink(),
-                        "size": stat.st_size if not entry.is_dir(follow_symlinks=False) else None,
-                        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": is_dir,
+                        "is_symlink": is_link,
+                        "size": stat_info.st_size if not is_dir else None,
+                        "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat()
                     })
                 except (PermissionError, OSError) as e:
-                    # Build path with /host prefix for display
-                    if path == "/host":
-                        item_path = f"/host/{entry.name}"
-                    else:
-                        item_path = f"{path}/{entry.name}" if path.endswith("/") else f"{path}/{entry.name}"
+                    # If we can't stat it, still include it but mark as error
                     items.append({
-                        "name": entry.name,
-                        "path": item_path,
-                        "is_dir": entry.is_dir(follow_symlinks=False),
-                        "is_symlink": entry.is_symlink(),
-                        "size": None,
-                        "modified": None,
+                        "name": name,
+                        "path": entry_path,
+                        "is_dir": False,
                         "error": str(e)
                     })
-        except PermissionError:
-            return {"success": False, "error": "Permission denied", "items": []}
+        except Exception as e:
+            return {"success": False, "error": f"Error reading directory: {str(e)}", "items": []}
         
         # Sort: directories first, then files, alphabetically
-        items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+        items.sort(key=lambda x: (not x.get("is_dir", False), x["name"].lower()))
         
-        # Ensure display path always starts with /host
-        display_path = path if path.startswith("/host") else f"/host{path if path.startswith('/') else '/' + path}"
-        if display_path == "/host/":
-            display_path = "/host"
-        
-        # Calculate parent path
-        parent_path = None
-        if display_path != "/host":
-            parent = os.path.dirname(display_path)
-            parent_path = parent if parent and parent != "/" else "/host"
+        # Calculate parent path (respecting restriction)
+        parent_path = os.path.dirname(actual_path)
+        if not parent_path.startswith(restricted_root):
+            parent_path = None # Disable back button if at root
         
         return {
             "success": True,
-            "path": display_path,
+            "path": actual_path,
             "parent": parent_path,
-            "items": items
+            "items": items,
+            "root": restricted_root
         }
     
     except Exception as e:
         return {"success": False, "error": str(e), "items": []}
 
 
+@app.post("/api/files/create-folder")
+async def create_folder(request: Request):
+    """Create a new folder in the specified path."""
+    try:
+        # Parse JSON body
+        body = await request.json()
+        path = body.get("path", "")
+        folder_name = body.get("folder_name", "")
+        
+        if not path:
+            return {"success": False, "error": "Path is required"}
+        
+        if not folder_name:
+            return {"success": False, "error": "Folder name is required"}
+        
+        # Normalize the path to container path
+        actual_path = normalize_path(path)
+        
+        if not os.path.exists(actual_path):
+            return {"success": False, "error": f"Parent directory does not exist: {path}"}
+        
+        if not os.path.isdir(actual_path):
+            return {"success": False, "error": f"Path is not a directory: {path}"}
+        
+        # Sanitize folder name
+        folder_name = folder_name.strip()
+        if not folder_name:
+            return {"success": False, "error": "Folder name cannot be empty"}
+        
+        # Remove any path separators from folder name
+        folder_name = folder_name.replace('/', '').replace('\\', '')
+        if not folder_name:
+            return {"success": False, "error": "Invalid folder name"}
+        
+        new_folder_path = os.path.join(actual_path, folder_name)
+        
+        # Check if folder already exists
+        if os.path.exists(new_folder_path):
+            return {"success": False, "error": f"Folder already exists: {folder_name}"}
+        
+        # Create the folder
+        os.makedirs(new_folder_path, exist_ok=False)
+        
+        return {
+            "success": True,
+            "message": f"Folder '{folder_name}' created successfully",
+            "path": new_folder_path
+        }
+    except PermissionError:
+        return {"success": False, "error": "Permission denied: Cannot create folder in this location"}
+    except OSError as e:
+        return {"success": False, "error": f"Failed to create folder: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {str(e)}"}
+
+
 @app.get("/api/files/backups")
-async def list_backups(backup_dir: str = "/tmp/postgres-backups"):
-    """List available backups."""
+async def list_backups(backup_dir: str = "/tmp/db-backups"):
+    """List available backups (Sessions)."""
     try:
         # Normalize the path to container path
         actual_path = normalize_path(backup_dir)
@@ -1003,40 +1150,48 @@ async def list_backups(backup_dir: str = "/tmp/postgres-backups"):
         
         backups = []
         
-        for db_dir in os.scandir(actual_path):
-            if db_dir.is_dir() and db_dir.name != "temp_extract":
-                db_backups = []
-                
-                try:
-                    for item in os.scandir(db_dir.path):
-                        if item.name.endswith("_backup.tar.gz"):
-                            stat = item.stat()
-                            db_backups.append({
-                                "file": item.name,
-                                "path": item.path,
-                                "size": stat.st_size,
-                                "created": datetime.fromtimestamp(stat.st_mtime).isoformat()
-                            })
-                        elif item.is_dir():
-                            # Timestamp folder
-                            dump_file = os.path.join(item.path, f"{db_dir.name}_dump.sql")
-                            if os.path.exists(dump_file):
-                                stat = os.stat(dump_file)
-                                db_backups.append({
-                                    "file": f"{item.name}/{db_dir.name}_dump.sql",
-                                    "path": dump_file,
-                                    "size": stat.st_size,
-                                    "created": datetime.fromtimestamp(stat.st_mtime).isoformat()
-                                })
-                except PermissionError:
-                    pass
-                
-                if db_backups:
-                    db_backups.sort(key=lambda x: x["created"], reverse=True)
-                    backups.append({
-                        "database": db_dir.name,
-                        "backups": db_backups
-                    })
+        # Scan for session directories (YYYY-MM-DD_HH-MM-SS)
+        # Use listdir instead of scandir to avoid file handle leaks
+        try:
+            for item_name in os.listdir(actual_path):
+                item_path = os.path.join(actual_path, item_name)
+                if os.path.isdir(item_path) and item_name != "temp_extract":
+                    # Basic check for timestamp format
+                    if len(item_name.split('_')) >= 2:
+                        try:
+                            stat_info = os.stat(item_path)
+                            session_info = {
+                                "session_id": item_name,
+                                "path": item_path,
+                                "created": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                                "databases": [],
+                                "has_files": False
+                            }
+                            
+                            # Check for databases inside
+                            db_dir = os.path.join(item_path, 'databases')
+                            if os.path.exists(db_dir):
+                                try:
+                                    for db_file in os.listdir(db_dir):
+                                        if db_file.endswith('.sql'):
+                                            session_info["databases"].append(db_file[:-4]) # remove .sql
+                                except (PermissionError, OSError):
+                                    pass
+                            
+                            # Check for files archive
+                            if os.path.exists(os.path.join(item_path, 'files.tar.gz')):
+                                session_info["has_files"] = True
+                                
+                            if session_info["databases"] or session_info["has_files"]:
+                                backups.append(session_info)
+                        except (PermissionError, OSError):
+                            # Skip directories we can't access
+                            continue
+        except (PermissionError, OSError) as e:
+            return {"success": False, "error": f"Error reading backup directory: {str(e)}", "backups": []}
+        
+        # Sort by creation time desc
+        backups.sort(key=lambda x: x["created"], reverse=True)
         
         return {"success": True, "backups": backups}
     
@@ -1057,6 +1212,27 @@ async def get_disk_usage():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================================
+# WebSocket Routes
+# ============================================================================
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for real-time log streaming."""
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive and handle incoming messages
+            data = await websocket.receive_text()
+            # Echo back or handle client messages if needed
+            await websocket.send_json({"type": "pong", "data": data})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        manager.disconnect(websocket)
+        print(f"WebSocket error: {e}")
 
 
 # ============================================================================
