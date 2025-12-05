@@ -85,6 +85,7 @@ class DatabaseBackupManager:
         # Initialize pg tool paths to defaults (will be updated by _detect_pg_tools)
         self.psql_path = 'psql'
         self.pg_dump_path = 'pg_dump'
+        self.pg_dumpall_path = 'pg_dumpall'
         self.server_version = None
         
         # Try to detect PostgreSQL tools, but don't fail if DB is not available
@@ -100,6 +101,8 @@ class DatabaseBackupManager:
                 self.psql_path = 'psql'
             if not self.pg_dump_path:
                 self.pg_dump_path = 'pg_dump'
+            if not self.pg_dumpall_path:
+                self.pg_dumpall_path = 'pg_dumpall'
     
     def _detect_pg_tools(self):
         """Detect and configure PostgreSQL client tools matching server version."""
@@ -139,38 +142,47 @@ class DatabaseBackupManager:
                     # Find tools that are >= server version
                     self.pg_dump_path = self._find_compatible_pg_tool('pg_dump', self.server_version)
                     self.psql_path = self._find_compatible_pg_tool('psql', self.server_version)
+                    self.pg_dumpall_path = self._find_compatible_pg_tool('pg_dumpall', self.server_version)
                     
                     # Ensure paths are never None
                     if not self.pg_dump_path:
                         self.pg_dump_path = temp_psql.replace('psql', 'pg_dump') if 'psql' in temp_psql else 'pg_dump'
                     if not self.psql_path:
                         self.psql_path = temp_psql
+                    if not self.pg_dumpall_path:
+                        self.pg_dumpall_path = temp_psql.replace('psql', 'pg_dumpall') if 'psql' in temp_psql else 'pg_dumpall'
                     
                     self.logger.info(f"Using pg_dump: {self.pg_dump_path}")
                     self.logger.info(f"Using psql: {self.psql_path}")
+                    self.logger.info(f"Using pg_dumpall: {self.pg_dumpall_path}")
                 else:
                     # DB might be down, fallback to defaults
                     self.logger.warning(f"Could not get server version (DB might be down): {result.stderr}")
                     self.server_version = None
                     self.pg_dump_path = self._find_any_pg_tool('pg_dump') or 'pg_dump'
                     self.psql_path = temp_psql
+                    self.pg_dumpall_path = self._find_any_pg_tool('pg_dumpall') or 'pg_dumpall'
             except Exception as e:
                 self.logger.warning(f"Connection failed during tool detection: {e}")
                 self.server_version = None
                 self.pg_dump_path = self._find_any_pg_tool('pg_dump') or 'pg_dump'
                 self.psql_path = temp_psql
+                self.pg_dumpall_path = self._find_any_pg_tool('pg_dumpall') or 'pg_dumpall'
                 
         except Exception as e:
             self.logger.warning(f"Could not detect PostgreSQL tools: {e}")
             self.server_version = None
             self.pg_dump_path = 'pg_dump'
             self.psql_path = 'psql'
+            self.pg_dumpall_path = 'pg_dumpall'
         
-        # Final safety check - ensure psql_path is never None
+        # Final safety check - ensure paths are never None
         if not self.psql_path:
             self.psql_path = 'psql'
         if not self.pg_dump_path:
             self.pg_dump_path = 'pg_dump'
+        if not self.pg_dumpall_path:
+            self.pg_dumpall_path = 'pg_dumpall'
     
     def _get_installed_pg_versions(self) -> List[int]:
         """Discover all installed PostgreSQL versions on the system."""
@@ -210,7 +222,7 @@ class DatabaseBackupManager:
                     pass
         
         # Also check what's in PATH
-        for tool in ['pg_dump', 'psql']:
+        for tool in ['pg_dump', 'psql', 'pg_dumpall']:
             path = shutil.which(tool)
             if path:
                 try:
@@ -346,12 +358,15 @@ class DatabaseBackupManager:
                 '-c', 'SELECT version();'
             ]
             
+            # Set connection timeout environment variable for faster failure
+            env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '5'} if self.password else {**os.environ, 'PGCONNECT_TIMEOUT': '5'}
+            
             result = subprocess.run(
                 test_cmd,
-                env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ,
+                env=env,
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=8  # Reduced from 10 to 8 seconds
             )
             
             if result.returncode == 0:
@@ -392,11 +407,15 @@ class DatabaseBackupManager:
 
             self.logger.info(f"Executing command: {' '.join(cmd)}")
 
+            # Set connection timeout for faster failure if DB is unreachable
+            env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '5'} if self.password else {**os.environ, 'PGCONNECT_TIMEOUT': '5'}
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ
+                env=env,
+                timeout=8  # Add timeout to prevent hanging
             )
 
             if result.returncode != 0:
@@ -420,13 +439,17 @@ class DatabaseBackupManager:
         """
         Backup databases and files into a single session folder.
         
+        When databases is None, backs up the entire PostgreSQL cluster using pg_dumpall.
+        When databases is specified, backs up only those specific databases.
+        
         Structure:
         backup_dir/
           YYYY-MM-DD_HH-MM-SS/
             files.tar.gz (if project_path or include_folders)
             databases/
-              db1.sql
-              db2.sql
+              cluster_dump.sql (if no databases specified - entire cluster)
+              OR
+              db1.sql, db2.sql (if specific databases specified)
         """
         try:
             timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -441,19 +464,64 @@ class DatabaseBackupManager:
                 files_archive = os.path.join(session_dir, 'files.tar.gz')
                 self.logger.info(f"Backing up files to: {files_archive}")
                 
+                # Define exclusion patterns for common unnecessary files/directories
+                # These significantly reduce backup size and time
+                exclude_dirs = {
+                    '__pycache__', '.git', '.svn', '.hg',  # Version control & Python cache
+                    'node_modules', '.npm', '.yarn',  # Node.js
+                    '.venv', 'venv', 'env', 'ENV', 'virtualenv',  # Virtual environments
+                    '.cache', '.pytest_cache', '.mypy_cache',  # Cache directories
+                    'dist', 'build', '.build',  # Build artifacts
+                    '.idea', '.vscode', '.vs',  # IDE files
+                    'htmlcov', '.tox', '.coverage',  # Test artifacts
+                }
+                
+                exclude_extensions = {'.pyc', '.pyo', '.pyd', '.log', '.tmp', '.temp', '.swp', '.swo', '.DS_Store', '.Thumbs.db'}
+                
+                def should_exclude(tarinfo):
+                    """Filter function to exclude unnecessary files from backup."""
+                    name = tarinfo.name
+                    path_parts = name.split('/')
+                    
+                    # Check directory names
+                    for part in path_parts:
+                        if part in exclude_dirs:
+                            return None
+                    
+                    # Check file extensions
+                    if any(name.endswith(ext) for ext in exclude_extensions):
+                        return None
+                    
+                    # Check for patterns in filename
+                    basename = os.path.basename(name)
+                    if basename.startswith('.') and basename not in ['.env', '.gitignore', '.dockerignore']:
+                        # Exclude hidden files except important config files
+                        if basename not in ['.env', '.gitignore', '.dockerignore', '.gitkeep']:
+                            return None
+                    
+                    return tarinfo
+                
                 with tarfile.open(files_archive, 'w:gz') as tar:
                     if project_path and os.path.exists(project_path):
                         project_name = os.path.basename(project_path.rstrip('/'))
-                        tar.add(project_path, arcname=project_name, filter=lambda t: None if '__pycache__' in t.name or '.pyc' in t.name else t)
+                        self.logger.info(f"Archiving project: {project_path}")
+                        self.logger.info("This may take a while for large projects...")
+                        
+                        # Use tar.add with filter - automatically recursive for directories
+                        tar.add(project_path, arcname=project_name, filter=should_exclude)
+                        self.logger.info("Project files archived")
                     
                     if include_folders:
                         for folder in include_folders:
                             if os.path.exists(folder):
                                 folder_name = os.path.basename(folder)
-                                tar.add(folder, arcname=folder_name)
+                                self.logger.info(f"Archiving folder: {folder}")
+                                tar.add(folder, arcname=folder_name, filter=should_exclude)
                 
+                archive_size = os.path.getsize(files_archive)
                 self._set_permissions(files_archive)
-                self.logger.info("Files backup completed")
+                size_mb = archive_size / (1024*1024)
+                self.logger.info(f"Files backup completed: {size_mb:.1f} MB compressed")
                 
                 # Upload files archive if cloud storage configured
                 if self.storage_client and self.storage_type != 'local':
@@ -464,37 +532,91 @@ class DatabaseBackupManager:
             os.makedirs(db_dir, exist_ok=True)
             self._set_permissions(db_dir)
             
-            target_dbs = databases if databases else self.list_databases()
+            # Ensure pg_dumpall_path is set
+            if not hasattr(self, 'pg_dumpall_path') or not self.pg_dumpall_path:
+                self.pg_dumpall_path = self._find_any_pg_tool('pg_dumpall') or 'pg_dumpall'
             
-            for db in target_dbs:
-                self.logger.info(f"Backing up database: {db}")
-                dump_file = os.path.join(db_dir, f"{db}.sql")
+            # If no databases specified, backup entire cluster using pg_dumpall
+            if not databases or len(databases) == 0:
+                self.logger.info("No specific databases provided - backing up entire PostgreSQL cluster")
+                dump_file = os.path.join(db_dir, 'cluster_dump.sql')
                 
-                pg_dump_cmd = [
-                    self.pg_dump_path,
+                # Use pg_dumpall for cluster-wide backup (best practice)
+                pg_dumpall_cmd = [
+                    self.pg_dumpall_path,
                     f'-h{self.host}',
                     f'-p{self.port}',
                     f'-U{self.username}',
                     '-f', dump_file,
-                    '-v',
-                    '--no-owner',
-                    '--no-acl',
-                    db
+                    '-v',  # Verbose output
+                    '--clean',  # Add DROP statements
+                    '--if-exists',  # Use IF EXISTS for DROP statements (safer)
+                    '--no-owner',  # Don't output commands to set ownership
+                    '--no-acl',  # Don't output access privileges
+                    '--no-tablespaces',  # Don't include tablespace assignments
+                    '--no-privileges',  # Don't dump access privileges
                 ]
                 
-                subprocess.run(
-                    pg_dump_cmd,
-                    env={**os.environ, 'PGPASSWORD': self.password},
+                # Set connection timeout for faster failure if DB is unreachable
+                env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '10'}
+                
+                self.logger.info(f"Executing pg_dumpall to backup entire cluster...")
+                result = subprocess.run(
+                    pg_dumpall_cmd,
+                    env=env,
                     check=True,
                     capture_output=True,
                     text=True
                 )
                 
+                if result.returncode == 0:
+                    self.logger.info(f"Cluster backup completed successfully: {dump_file}")
+                else:
+                    self.logger.error(f"pg_dumpall failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, pg_dumpall_cmd, result.stdout, result.stderr)
+                
                 self._set_permissions(dump_file)
                 
-                # Upload DB dump if cloud storage configured
+                # Upload cluster dump if cloud storage configured
                 if self.storage_client and self.storage_type != 'local':
                     self._upload_to_cloud_storage(dump_file, f"{timestamp}/databases")
+            else:
+                # Backup specific databases using individual pg_dump calls
+                self.logger.info(f"Backing up specific databases: {databases}")
+                for db in databases:
+                    self.logger.info(f"Backing up database: {db}")
+                    dump_file = os.path.join(db_dir, f"{db}.sql")
+                    
+                    pg_dump_cmd = [
+                        self.pg_dump_path,
+                        f'-h{self.host}',
+                        f'-p{self.port}',
+                        f'-U{self.username}',
+                        '-f', dump_file,
+                        '-v',
+                        '--no-owner',
+                        '--no-acl',
+                        '--no-tablespaces',  # Don't include tablespace assignments
+                        '--no-privileges',   # Don't dump access privileges (redundant with --no-acl but ensures)
+                        db
+                    ]
+                    
+                    # Set connection timeout for faster failure if DB is unreachable
+                    env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '10'}
+                    
+                    subprocess.run(
+                        pg_dump_cmd,
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    self._set_permissions(dump_file)
+                    
+                    # Upload DB dump if cloud storage configured
+                    if self.storage_client and self.storage_type != 'local':
+                        self._upload_to_cloud_storage(dump_file, f"{timestamp}/databases")
                     
             self.logger.info(f"Session backup completed: {session_dir}")
             return True
@@ -593,135 +715,10 @@ class DatabaseBackupManager:
                     # Verify database is clean before restore
                     self._verify_database_empty(db_name)
                 
-                # Restore dump
-                # Use ON_ERROR_STOP to make psql exit on errors (not just warnings) - unless ignore_errors is set
-                # Use --single-transaction for atomic restore (all or nothing) - only when not ignoring errors
-                restore_cmd = [
-                    self.psql_path,
-                    f'-h{self.host}',
-                    f'-p{self.port}',
-                    f'-U{self.username}',
-                    '-d', db_name,
-                ]
+                # Filter out problematic parameters from SQL dump
+                filtered_sql_file, temp_file_to_cleanup = self._filter_sql_dump(sql_dump_file)
                 
-                if ignore_errors:
-                    # Don't use single-transaction when ignoring errors - allows partial restore
-                    self.logger.info("Running restore with --ignore-errors: errors will be logged but won't stop the restore")
-                else:
-                    restore_cmd.extend(['--single-transaction', '-v', 'ON_ERROR_STOP=1'])
-                
-                restore_cmd.extend(['-f', sql_dump_file])
-                
-                error_mode = "ignore-errors (continue on failure)" if ignore_errors else "ON_ERROR_STOP=1"
-                self.logger.info(f"Executing restore command: {' '.join(restore_cmd[:4])} ... -d {db_name} {error_mode} -f {sql_dump_file}")
-                result = subprocess.run(
-                    restore_cmd,
-                    env={**os.environ, 'PGPASSWORD': self.password},
-                    check=False,  # Don't raise exception, we'll handle it
-                    capture_output=True,
-                    text=True
-                )
-                
-                # Parse stderr for errors vs warnings
-                error_count = 0
-                warning_count = 0
-                critical_errors = []
-                
-                if result.stderr:
-                    stderr_lines = result.stderr.split('\n')
-                    for line in stderr_lines:
-                        if 'ERROR:' in line.upper():
-                            error_count += 1
-                            critical_errors.append(line.strip())
-                        elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
-                            warning_count += 1
-                
-                # Log detailed error information
-                if error_count > 0:
-                    log_level = self.logger.warning if ignore_errors else self.logger.error
-                    log_level(f"Restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
-                    if ignore_errors:
-                        self.logger.warning("Errors were ignored due to --ignore-errors flag")
-                    log_level("Errors found:")
-                    for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
-                        log_level(f"  {i}. {error}")
-                    if len(critical_errors) > 20:
-                        log_level(f"  ... and {len(critical_errors) - 20} more errors")
-                
-                if result.returncode != 0:
-                    if ignore_errors:
-                        self.logger.warning(f"Restore command returned code {result.returncode} but continuing due to --ignore-errors")
-                        if result.stderr:
-                            self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
-                    else:
-                        self.logger.error(f"Restore command failed with return code {result.returncode}")
-                        self.logger.error(f"STDERR: {result.stderr}")
-                        self.logger.error(f"STDOUT: {result.stdout}")
-                        raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
-                
-                # Even if return code is 0, check for critical errors
-                if error_count > 0 and not ignore_errors:
-                    self.logger.warning(f"Restore completed with exit code 0 but {error_count} ERROR(s) detected")
-                    self.logger.warning("This may indicate partial restore or data integrity issues")
-                    # Log full stderr for debugging
-                    if result.stderr:
-                        self.logger.warning(f"Full error output: {result.stderr}")
-                elif result.stderr and warning_count > 0:
-                    # Only warnings, no errors
-                    self.logger.warning(f"Restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
-                
-                self.logger.info(f"Restored database: {db_name}")
-                
-                # Verify the restore was successful
-                self.logger.info(f"Verifying restore for database '{db_name}'...")
-                if self._verify_database_restore(db_name):
-                    self.logger.info(f"✓ Restore verification successful for database '{db_name}'")
-                    print(f"✓ Restore verification successful for database '{db_name}'")
-                else:
-                    self.logger.error(f"✗ Restore verification failed for database '{db_name}'")
-                    print(f"✗ WARNING: Restore verification failed for database '{db_name}'. Please check the database manually.")
-                    # Don't return False here - the restore command succeeded, verification is just a check
-                
-                return True
-            
-            # Only validate backup_path if sql_dump_file is not provided
-            if not sql_dump_file and (not backup_path or not os.path.exists(backup_path)):
-                raise FileNotFoundError(f"Backup path not found: {backup_path}")
-                
-            # 1. Restore Databases
-            db_dir = os.path.join(backup_path, 'databases')
-            self.logger.info(f"Looking for database dumps in: {db_dir}")
-            self.logger.info(f"  Directory exists: {os.path.exists(db_dir)}")
-            
-            databases_restored = 0
-            
-            if os.path.exists(db_dir):
-                dump_files = [f for f in os.listdir(db_dir) if f.endswith('.sql')]
-                self.logger.info(f"  Found {len(dump_files)} SQL dump file(s): {dump_files}")
-                
-                if not dump_files:
-                    self.logger.warning(f"No SQL dump files found in {db_dir}")
-                    self.logger.warning(f"  Available files: {os.listdir(db_dir) if os.path.exists(db_dir) else 'N/A'}")
-                    raise FileNotFoundError(f"No SQL dump files found in {db_dir}")
-                
-                for dump_file in dump_files:
-                    db_name = dump_file[:-4] # Remove .sql
-                    
-                    if restore_type == 'specific' and specific_db and db_name != specific_db:
-                        self.logger.info(f"Skipping database {db_name} (not matching specific_db: {specific_db})")
-                        continue
-                        
-                    self.logger.info(f"Restoring database: {db_name}")
-                    full_dump_path = os.path.join(db_dir, dump_file)
-                    self.logger.info(f"  Using dump file: {full_dump_path}")
-                    self.logger.info(f"  Dump file exists: {os.path.exists(full_dump_path)}")
-                    
-                    # Create/Drop DB logic similar to restore_database
-                    if drop_existing:
-                        self._drop_and_create_db(db_name)
-                        # Verify database is clean before restore
-                        self._verify_database_empty(db_name)
-                    
+                try:
                     # Restore dump
                     # Use ON_ERROR_STOP to make psql exit on errors (not just warnings) - unless ignore_errors is set
                     # Use --single-transaction for atomic restore (all or nothing) - only when not ignoring errors
@@ -739,10 +736,14 @@ class DatabaseBackupManager:
                     else:
                         restore_cmd.extend(['--single-transaction', '-v', 'ON_ERROR_STOP=1'])
                     
-                    restore_cmd.extend(['-f', full_dump_path])
+                    restore_cmd.extend(['-f', filtered_sql_file])
                     
-                    error_mode = "ignore-errors (continue on failure)" if ignore_errors else "ON_ERROR_STOP=1"
-                    self.logger.info(f"Executing restore command: {' '.join(restore_cmd[:4])} ... -d {db_name} {error_mode} -f {full_dump_path}")
+                    # Log the command (hide password in connection string)
+                    cmd_display = ' '.join(restore_cmd)
+                    if ignore_errors:
+                        self.logger.info(f"Executing restore command: {cmd_display} (errors will be ignored)")
+                    else:
+                        self.logger.info(f"Executing restore command: {cmd_display}")
                     result = subprocess.run(
                         restore_cmd,
                         env={**os.environ, 'PGPASSWORD': self.password},
@@ -809,8 +810,280 @@ class DatabaseBackupManager:
                     else:
                         self.logger.error(f"✗ Restore verification failed for database '{db_name}'")
                         print(f"✗ WARNING: Restore verification failed for database '{db_name}'. Please check the database manually.")
+                        # Don't return False here - the restore command succeeded, verification is just a check
                     
-                    databases_restored += 1
+                    return True
+                finally:
+                    # Clean up temp filtered file if created
+                    if temp_file_to_cleanup:
+                        try:
+                            os.remove(temp_file_to_cleanup)
+                            self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
+                        except Exception as e:
+                            self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
+            
+            # Only validate backup_path if sql_dump_file is not provided
+            if not sql_dump_file and (not backup_path or not os.path.exists(backup_path)):
+                raise FileNotFoundError(f"Backup path not found: {backup_path}")
+                
+            # 1. Restore Databases
+            db_dir = os.path.join(backup_path, 'databases')
+            self.logger.info(f"Looking for database dumps in: {db_dir}")
+            self.logger.info(f"  Directory exists: {os.path.exists(db_dir)}")
+            
+            databases_restored = 0
+            
+            if os.path.exists(db_dir):
+                dump_files = [f for f in os.listdir(db_dir) if f.endswith('.sql')]
+                self.logger.info(f"  Found {len(dump_files)} SQL dump file(s): {dump_files}")
+                
+                if not dump_files:
+                    self.logger.warning(f"No SQL dump files found in {db_dir}")
+                    self.logger.warning(f"  Available files: {os.listdir(db_dir) if os.path.exists(db_dir) else 'N/A'}")
+                    raise FileNotFoundError(f"No SQL dump files found in {db_dir}")
+                
+                # Check if this is a cluster dump (pg_dumpall output)
+                cluster_dump_file = 'cluster_dump.sql' if 'cluster_dump.sql' in dump_files else None
+                
+                if cluster_dump_file:
+                    # Handle cluster-wide restore (pg_dumpall output)
+                    self.logger.info("Detected cluster dump - restoring entire PostgreSQL cluster")
+                    
+                    if restore_type == 'specific' and specific_db:
+                        self.logger.warning("Cluster dump detected but specific database requested. Cluster dump restores all databases.")
+                        self.logger.warning("Ignoring --database parameter and restoring entire cluster.")
+                    
+                    # If drop_existing is True, drop all existing databases (except system databases)
+                    if drop_existing:
+                        self.logger.info("Dropping existing databases before cluster restore...")
+                        self._drop_all_databases()
+                    
+                    full_dump_path = os.path.join(db_dir, cluster_dump_file)
+                    self.logger.info(f"  Using cluster dump file: {full_dump_path}")
+                    self.logger.info(f"  Dump file exists: {os.path.exists(full_dump_path)}")
+                    
+                    # Filter out problematic parameters from SQL dump
+                    filtered_dump_path, temp_file_to_cleanup = self._filter_sql_dump(full_dump_path)
+                    
+                    try:
+                        # Restore cluster dump to postgres database (or without -d flag)
+                        # pg_dumpall output includes CREATE DATABASE statements, so we connect to postgres
+                        restore_cmd = [
+                            self.psql_path,
+                            f'-h{self.host}',
+                            f'-p{self.port}',
+                            f'-U{self.username}',
+                            '-d', 'postgres',  # Connect to postgres database for cluster restore
+                        ]
+                        
+                        if ignore_errors:
+                            # Don't use single-transaction when ignoring errors - allows partial restore
+                            self.logger.info("Running cluster restore with --ignore-errors: errors will be logged but won't stop the restore")
+                        else:
+                            # Note: --single-transaction may not work well with pg_dumpall output
+                            # as it contains multiple CREATE DATABASE statements
+                            # Use ON_ERROR_STOP instead
+                            restore_cmd.extend(['-v', 'ON_ERROR_STOP=1'])
+                        
+                        restore_cmd.extend(['-f', filtered_dump_path])
+                        
+                        # Set connection timeout for faster failure if DB is unreachable
+                        env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '10'} if self.password else {**os.environ, 'PGCONNECT_TIMEOUT': '10'}
+                        
+                        error_mode = "ignore-errors (continue on failure)" if ignore_errors else "ON_ERROR_STOP=1"
+                        self.logger.info(f"Executing cluster restore command: {' '.join(restore_cmd[:4])} ... {error_mode} -f {full_dump_path}")
+                        result = subprocess.run(
+                            restore_cmd,
+                            env=env,
+                            check=False,  # Don't raise exception, we'll handle it
+                            capture_output=True,
+                            text=True
+                        )
+                        
+                        # Parse stderr for errors vs warnings
+                        error_count = 0
+                        warning_count = 0
+                        critical_errors = []
+                        
+                        if result.stderr:
+                            stderr_lines = result.stderr.split('\n')
+                            for line in stderr_lines:
+                                if 'ERROR:' in line.upper():
+                                    error_count += 1
+                                    critical_errors.append(line.strip())
+                                elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
+                                    warning_count += 1
+                        
+                        # Log detailed error information
+                        if error_count > 0:
+                            log_level = self.logger.warning if ignore_errors else self.logger.error
+                            log_level(f"Cluster restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
+                            if ignore_errors:
+                                self.logger.warning("Errors were ignored due to --ignore-errors flag")
+                            log_level("Errors found:")
+                            for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
+                                log_level(f"  {i}. {error}")
+                            if len(critical_errors) > 20:
+                                log_level(f"  ... and {len(critical_errors) - 20} more errors")
+                        
+                        if result.returncode != 0:
+                            if ignore_errors:
+                                self.logger.warning(f"Cluster restore command returned code {result.returncode} but continuing due to --ignore-errors")
+                                if result.stderr:
+                                    self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
+                            else:
+                                self.logger.error(f"Cluster restore command failed with return code {result.returncode}")
+                                self.logger.error(f"STDERR: {result.stderr}")
+                                self.logger.error(f"STDOUT: {result.stdout}")
+                                raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
+                        
+                        # Even if return code is 0, check for critical errors
+                        if error_count > 0 and not ignore_errors:
+                            self.logger.warning(f"Cluster restore completed with exit code 0 but {error_count} ERROR(s) detected")
+                            self.logger.warning("This may indicate partial restore or data integrity issues")
+                            # Log full stderr for debugging
+                            if result.stderr:
+                                self.logger.warning(f"Full error output: {result.stderr}")
+                        elif result.stderr and warning_count > 0:
+                            # Only warnings, no errors
+                            self.logger.warning(f"Cluster restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
+                        
+                        self.logger.info("✓ Cluster restore completed successfully")
+                        print("✓ Cluster restore completed successfully")
+                        databases_restored = 1  # Mark as restored
+                        
+                    finally:
+                        # Clean up temp filtered file if created
+                        if temp_file_to_cleanup:
+                            try:
+                                os.remove(temp_file_to_cleanup)
+                                self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
+                            except Exception as e:
+                                self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
+                else:
+                    # Handle individual database dumps (pg_dump output)
+                    for dump_file in dump_files:
+                        db_name = dump_file[:-4] # Remove .sql
+                        
+                        if restore_type == 'specific' and specific_db and db_name != specific_db:
+                            self.logger.info(f"Skipping database {db_name} (not matching specific_db: {specific_db})")
+                            continue
+                            
+                        self.logger.info(f"Restoring database: {db_name}")
+                        full_dump_path = os.path.join(db_dir, dump_file)
+                        self.logger.info(f"  Using dump file: {full_dump_path}")
+                        self.logger.info(f"  Dump file exists: {os.path.exists(full_dump_path)}")
+                        
+                        # Create/Drop DB logic similar to restore_database
+                        if drop_existing:
+                            self._drop_and_create_db(db_name)
+                            # Verify database is clean before restore
+                            self._verify_database_empty(db_name)
+                        
+                        # Filter out problematic parameters from SQL dump
+                        filtered_dump_path, temp_file_to_cleanup = self._filter_sql_dump(full_dump_path)
+                        
+                        try:
+                            # Restore dump
+                            # Use ON_ERROR_STOP to make psql exit on errors (not just warnings) - unless ignore_errors is set
+                            # Use --single-transaction for atomic restore (all or nothing) - only when not ignoring errors
+                            restore_cmd = [
+                                self.psql_path,
+                                f'-h{self.host}',
+                                f'-p{self.port}',
+                                f'-U{self.username}',
+                                '-d', db_name,
+                            ]
+                            
+                            if ignore_errors:
+                                # Don't use single-transaction when ignoring errors - allows partial restore
+                                self.logger.info("Running restore with --ignore-errors: errors will be logged but won't stop the restore")
+                            else:
+                                restore_cmd.extend(['--single-transaction', '-v', 'ON_ERROR_STOP=1'])
+                            
+                            restore_cmd.extend(['-f', filtered_dump_path])
+                            
+                            # Set connection timeout for faster failure if DB is unreachable
+                            env = {**os.environ, 'PGPASSWORD': self.password, 'PGCONNECT_TIMEOUT': '10'} if self.password else {**os.environ, 'PGCONNECT_TIMEOUT': '10'}
+                            
+                            error_mode = "ignore-errors (continue on failure)" if ignore_errors else "ON_ERROR_STOP=1"
+                            self.logger.info(f"Executing restore command: {' '.join(restore_cmd[:4])} ... -d {db_name} {error_mode} -f {full_dump_path}")
+                            result = subprocess.run(
+                                restore_cmd,
+                                env=env,
+                                check=False,  # Don't raise exception, we'll handle it
+                                capture_output=True,
+                                text=True
+                            )
+                            
+                            # Parse stderr for errors vs warnings
+                            error_count = 0
+                            warning_count = 0
+                            critical_errors = []
+                            
+                            if result.stderr:
+                                stderr_lines = result.stderr.split('\n')
+                                for line in stderr_lines:
+                                    if 'ERROR:' in line.upper():
+                                        error_count += 1
+                                        critical_errors.append(line.strip())
+                                    elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
+                                        warning_count += 1
+                            
+                            # Log detailed error information
+                            if error_count > 0:
+                                log_level = self.logger.warning if ignore_errors else self.logger.error
+                                log_level(f"Restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
+                                if ignore_errors:
+                                    self.logger.warning("Errors were ignored due to --ignore-errors flag")
+                                log_level("Errors found:")
+                                for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
+                                    log_level(f"  {i}. {error}")
+                                if len(critical_errors) > 20:
+                                    log_level(f"  ... and {len(critical_errors) - 20} more errors")
+                            
+                            if result.returncode != 0:
+                                if ignore_errors:
+                                    self.logger.warning(f"Restore command returned code {result.returncode} but continuing due to --ignore-errors")
+                                    if result.stderr:
+                                        self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
+                                else:
+                                    self.logger.error(f"Restore command failed with return code {result.returncode}")
+                                    self.logger.error(f"STDERR: {result.stderr}")
+                                    self.logger.error(f"STDOUT: {result.stdout}")
+                                    raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
+                            
+                            # Even if return code is 0, check for critical errors
+                            if error_count > 0 and not ignore_errors:
+                                self.logger.warning(f"Restore completed with exit code 0 but {error_count} ERROR(s) detected")
+                                self.logger.warning("This may indicate partial restore or data integrity issues")
+                                # Log full stderr for debugging
+                                if result.stderr:
+                                    self.logger.warning(f"Full error output: {result.stderr}")
+                            elif result.stderr and warning_count > 0:
+                                # Only warnings, no errors
+                                self.logger.warning(f"Restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
+                            
+                            self.logger.info(f"Restored database: {db_name}")
+                            
+                            # Verify the restore was successful
+                            self.logger.info(f"Verifying restore for database '{db_name}'...")
+                            if self._verify_database_restore(db_name):
+                                self.logger.info(f"✓ Restore verification successful for database '{db_name}'")
+                                print(f"✓ Restore verification successful for database '{db_name}'")
+                            else:
+                                self.logger.error(f"✗ Restore verification failed for database '{db_name}'")
+                                print(f"✗ WARNING: Restore verification failed for database '{db_name}'. Please check the database manually.")
+                            
+                            databases_restored += 1
+                        finally:
+                            # Clean up temp filtered file if created
+                            if temp_file_to_cleanup:
+                                try:
+                                    os.remove(temp_file_to_cleanup)
+                                    self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
+                                except Exception as e:
+                                    self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
             else:
                 self.logger.error(f"Database directory not found: {db_dir}")
                 raise FileNotFoundError(f"Database directory not found: {db_dir}")
@@ -929,7 +1202,6 @@ class DatabaseBackupManager:
                 self.logger.warning(f"Warning: Could not terminate all connections: {term_result.stderr}")
             else:
                 self.logger.info(f"Connections terminated. Waiting 2 seconds for cleanup...")
-                import time
                 time.sleep(2)  # Wait for connections to fully close
             
             # Drop database with retry logic
@@ -1004,6 +1276,40 @@ class DatabaseBackupManager:
                     self.logger.error(f"Failed to drop database '{db_name}': {drop_result.stderr}")
                     raise subprocess.CalledProcessError(drop_result.returncode, drop_cmd, drop_result.stdout, drop_result.stderr)
             
+            # Check if user has CREATEDB privilege before attempting to create database
+            self.logger.info(f"Checking if user '{self.username}' has CREATEDB privilege...")
+            check_createdb_cmd = [
+                str(self.psql_path),
+                f'-h{self.host}',
+                f'-p{self.port}',
+                f'-U{self.username}',
+                'postgres',
+                '-t', '-A',
+                '-c', "SELECT usecreatedb FROM pg_user WHERE usename = current_user;"
+            ]
+            
+            check_result = subprocess.run(
+                check_createdb_cmd,
+                env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if check_result.returncode == 0:
+                has_createdb = check_result.stdout.strip() == 't'
+                if not has_createdb:
+                    error_msg = (
+                        f"User '{self.username}' does not have CREATEDB privilege. "
+                        f"Cannot create database '{db_name}'. "
+                        f"Please grant CREATEDB privilege to user '{self.username}' or use a superuser account."
+                    )
+                    self.logger.error(error_msg)
+                    raise PermissionError(error_msg)
+                self.logger.info(f"User '{self.username}' has CREATEDB privilege")
+            else:
+                self.logger.warning(f"Could not verify CREATEDB privilege: {check_result.stderr}. Proceeding with database creation...")
+            
             # Create fresh database
             self.logger.info(f"Creating fresh database '{db_name}'...")
             create_cmd = [
@@ -1020,22 +1326,272 @@ class DatabaseBackupManager:
                 self.logger.error(f"CRITICAL: Create command list contains None values! Command: {create_cmd}")
                 raise ValueError("Create command list cannot contain None values")
             
-            create_result = subprocess.run(
-                create_cmd, 
-                env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ, 
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+            # Try CREATE DATABASE with collation mismatch auto-fix
+            max_create_attempts = 2
+            for create_attempt in range(max_create_attempts):
+                create_result = subprocess.run(
+                    create_cmd, 
+                    env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ, 
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if create_result.returncode == 0:
+                    self.logger.info(f"Database '{db_name}' created successfully")
+                    break
+                
+                # Check for collation version mismatch error
+                stderr_lower = create_result.stderr.lower() if create_result.stderr else ''
+                if 'collation version mismatch' in stderr_lower and create_attempt < max_create_attempts - 1:
+                    self.logger.warning(
+                        "Detected collation version mismatch on template database. "
+                        "This typically happens after system updates. Attempting automatic fix..."
+                    )
+                    
+                    # Try to fix the collation mismatch
+                    if self._fix_collation_version_mismatch():
+                        self.logger.info("Collation fix applied, retrying database creation...")
+                        continue
+                    else:
+                        self.logger.error(
+                            "Could not automatically fix collation version mismatch. "
+                            "Please run the following commands manually as a PostgreSQL superuser:\n"
+                            "  ALTER DATABASE template1 REFRESH COLLATION VERSION;\n"
+                            "  ALTER DATABASE postgres REFRESH COLLATION VERSION;"
+                        )
+                
+                # If we get here, creation failed
+                raise subprocess.CalledProcessError(
+                    create_result.returncode, 
+                    create_cmd, 
+                    create_result.stdout, 
+                    create_result.stderr
+                )
             
-            self.logger.info(f"Database '{db_name}' created successfully")
-            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error recreating DB {db_name}: Command failed with exit code {e.returncode}")
+            if 'create_cmd' in locals():
+                self.logger.error(f"Command: {' '.join(create_cmd)}")
+            if e.stdout:
+                self.logger.error(f"stdout: {e.stdout}")
+            if e.stderr:
+                self.logger.error(f"stderr: {e.stderr}")
+            raise
+        except PermissionError:
+            # Re-raise permission errors as-is (they already have clear messages)
+            raise
         except Exception as e:
             self.logger.error(f"Error recreating DB {db_name}: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             raise
+    
+    def _drop_all_databases(self):
+        """
+        Drop all non-system databases for cluster restore.
+        System databases (postgres, template0, template1) are preserved.
+        """
+        try:
+            # Ensure psql_path is set
+            if not hasattr(self, 'psql_path') or not self.psql_path:
+                self.psql_path = self._find_any_pg_tool('psql') or 'psql'
+            
+            # Get list of all databases (excluding system databases)
+            databases = self.list_databases(include_system=False)
+            
+            if not databases:
+                self.logger.info("No user databases found to drop")
+                return
+            
+            self.logger.info(f"Dropping {len(databases)} user database(s): {databases}")
+            
+            for db_name in databases:
+                try:
+                    # Terminate all connections first
+                    self.logger.info(f"Terminating connections to database '{db_name}'...")
+                    term_cmd = [
+                        str(self.psql_path),
+                        f'-h{self.host}',
+                        f'-p{self.port}',
+                        f'-U{self.username}',
+                        'postgres',
+                        '-c', f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
+                    ]
+                    
+                    subprocess.run(
+                        term_cmd,
+                        env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    # Drop the database
+                    drop_cmd = [
+                        str(self.psql_path),
+                        f'-h{self.host}',
+                        f'-p{self.port}',
+                        f'-U{self.username}',
+                        'postgres',
+                        '-c', f'DROP DATABASE IF EXISTS "{db_name}";'
+                    ]
+                    
+                    drop_result = subprocess.run(
+                        drop_cmd,
+                        env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if drop_result.returncode == 0:
+                        self.logger.info(f"✓ Dropped database: {db_name}")
+                    else:
+                        self.logger.warning(f"Failed to drop database '{db_name}': {drop_result.stderr}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Error dropping database '{db_name}': {e}")
+                    # Continue with other databases
+            
+            self.logger.info("Finished dropping user databases")
+            
+        except Exception as e:
+            self.logger.error(f"Error in _drop_all_databases: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            # Don't raise - allow restore to continue even if some databases couldn't be dropped
+
+    def _fix_collation_version_mismatch(self) -> bool:
+        """
+        Fix collation version mismatch on template databases.
+        
+        This error occurs when the system's glibc version has changed since the
+        PostgreSQL template databases were created. The fix is to refresh the
+        collation version on template1 and postgres databases.
+        
+        Returns:
+            bool: True if fix was successful, False otherwise
+        """
+        self.logger.info("Attempting to fix collation version mismatch on template databases...")
+        
+        databases_to_fix = ['template1', 'postgres']
+        fixed_any = False
+        
+        for db in databases_to_fix:
+            try:
+                refresh_cmd = [
+                    str(self.psql_path),
+                    f'-h{self.host}',
+                    f'-p{self.port}',
+                    f'-U{self.username}',
+                    db,
+                    '-c', f'ALTER DATABASE {db} REFRESH COLLATION VERSION;'
+                ]
+                
+                self.logger.info(f"Refreshing collation version on '{db}'...")
+                
+                result = subprocess.run(
+                    refresh_cmd,
+                    env={**os.environ, 'PGPASSWORD': self.password} if self.password else os.environ,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    self.logger.info(f"Successfully refreshed collation version on '{db}'")
+                    fixed_any = True
+                else:
+                    # Check if it's a permission error
+                    if 'permission denied' in result.stderr.lower() or 'must be owner' in result.stderr.lower():
+                        self.logger.warning(
+                            f"Cannot refresh collation on '{db}' - insufficient privileges. "
+                            f"User '{self.username}' may need superuser privileges. "
+                            f"You can manually fix this by running as superuser: "
+                            f"ALTER DATABASE {db} REFRESH COLLATION VERSION;"
+                        )
+                    else:
+                        self.logger.warning(f"Could not refresh collation on '{db}': {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Timeout refreshing collation on '{db}'")
+            except Exception as e:
+                self.logger.warning(f"Error refreshing collation on '{db}': {e}")
+        
+        return fixed_any
+
+    def _filter_sql_dump(self, sql_file: str) -> tuple:
+        """
+        Filter out problematic parameters from SQL dump files.
+        
+        Some PostgreSQL parameters (like transaction_timeout) are version-specific
+        or from custom builds (Odoo). This filters them out to allow restore on
+        standard PostgreSQL installations.
+        
+        Args:
+            sql_file: Path to the SQL dump file
+            
+        Returns:
+            tuple: (filtered_file_path, temp_file_path_or_none)
+                   If no filtering needed, returns (original_file, None)
+                   If filtered, returns (temp_file, temp_file) - caller should clean up
+        """
+        # Parameters to filter out (case-insensitive)
+        problematic_params = [
+            b'transaction_timeout',
+            b'idle_session_timeout',  # Another common Odoo/custom parameter
+        ]
+        
+        try:
+            # Quick check if file needs filtering
+            with open(sql_file, 'rb') as f:
+                # Read first 16KB to check for problematic parameters
+                first_chunk = f.read(16384)
+                needs_filtering = any(param in first_chunk.lower() for param in problematic_params)
+                
+                if not needs_filtering:
+                    # Also check a bit further in case SET statements are after initial comments
+                    f.seek(0)
+                    for i, line in enumerate(f):
+                        if i > 50:  # Check first 50 lines
+                            break
+                        line_lower = line.lower()
+                        if any(param in line_lower for param in problematic_params):
+                            needs_filtering = True
+                            break
+            
+            if not needs_filtering:
+                return (sql_file, None)
+            
+            self.logger.info("Filtering out unrecognized PostgreSQL parameters from SQL dump...")
+            
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.sql', delete=False)
+            temp_file_path = temp_file.name
+            
+            filtered_count = 0
+            with open(sql_file, 'rb') as infile:
+                for line in infile:
+                    line_lower = line.lower()
+                    # Check if line contains any problematic parameter
+                    should_filter = any(param in line_lower for param in problematic_params)
+                    
+                    if should_filter:
+                        filtered_count += 1
+                        # Write as comment instead of removing completely
+                        temp_file.write(b'-- FILTERED: ' + line)
+                    else:
+                        temp_file.write(line)
+            
+            temp_file.close()
+            self.logger.info(f"Filtered {filtered_count} line(s) with problematic parameters")
+            
+            return (temp_file_path, temp_file_path)
+            
+        except Exception as e:
+            self.logger.warning(f"Could not filter SQL file, using original: {e}")
+            return (sql_file, None)
 
     def _verify_database_empty(self, db_name: str) -> bool:
         """
@@ -1604,7 +2160,7 @@ class DatabaseBackupManager:
                     if database_exists:
                         self.logger.info(f"Database {database} already exists, skipping creation")
                     else:
-                        # Create fresh database
+                        # Create fresh database with collation mismatch auto-fix
                         self.logger.info(f"Creating fresh database {database}")
                         create_cmd = [
                             self.psql_path,
@@ -1616,22 +2172,47 @@ class DatabaseBackupManager:
                         ]
                         
                         try:
-                            result = subprocess.run(
-                                create_cmd,
-                                env={**os.environ, 'PGPASSWORD': self.password},
-                                capture_output=True,
-                                text=True,
-                                timeout=30
-                            )
-                            
-                            if result.returncode == 0:
-                                self.logger.info(f"Successfully created database {database}")
-                                # Verify database is clean before restore
-                                self._verify_database_empty(database)
-                            else:
-                                self.logger.error(f"Database creation failed with exit code: {result.returncode}")
-                                self.logger.error(f"STDERR: {result.stderr}")
-                                raise Exception(f"Failed to create database: {result.stderr}")
+                            max_create_attempts = 2
+                            for create_attempt in range(max_create_attempts):
+                                result = subprocess.run(
+                                    create_cmd,
+                                    env={**os.environ, 'PGPASSWORD': self.password},
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30
+                                )
+                                
+                                if result.returncode == 0:
+                                    self.logger.info(f"Successfully created database {database}")
+                                    # Verify database is clean before restore
+                                    self._verify_database_empty(database)
+                                    break
+                                
+                                # Check for collation version mismatch error
+                                stderr_lower = result.stderr.lower() if result.stderr else ''
+                                if 'collation version mismatch' in stderr_lower and create_attempt < max_create_attempts - 1:
+                                    self.logger.warning(
+                                        "Detected collation version mismatch on template database. "
+                                        "Attempting automatic fix..."
+                                    )
+                                    
+                                    # Try to fix the collation mismatch
+                                    if self._fix_collation_version_mismatch():
+                                        self.logger.info("Collation fix applied, retrying database creation...")
+                                        continue
+                                    else:
+                                        self.logger.error(
+                                            "Could not automatically fix collation version mismatch. "
+                                            "Please run manually as superuser:\n"
+                                            "  ALTER DATABASE template1 REFRESH COLLATION VERSION;\n"
+                                            "  ALTER DATABASE postgres REFRESH COLLATION VERSION;"
+                                        )
+                                
+                                # If we reach here on last attempt, raise error
+                                if create_attempt == max_create_attempts - 1:
+                                    self.logger.error(f"Database creation failed with exit code: {result.returncode}")
+                                    self.logger.error(f"STDERR: {result.stderr}")
+                                    raise Exception(f"Failed to create database: {result.stderr}")
                                 
                         except subprocess.TimeoutExpired:
                             self.logger.error("Database creation command timed out")
@@ -1647,32 +2228,8 @@ class DatabaseBackupManager:
             # Restore database
             self.logger.info(f"Starting database restore from: {backup_file}")
             
-            # Filter out problematic Odoo-specific parameters that PostgreSQL doesn't recognize
-            # Create a temporary filtered SQL file if needed
-            filtered_backup_file = backup_file
-            temp_filtered_file_path = None
-            try:
-                # Check if file contains transaction_timeout (common Odoo parameter)
-                with open(backup_file, 'rb') as f:
-                    first_chunk = f.read(8192)
-                    if b'transaction_timeout' in first_chunk:
-                        self.logger.info("Filtering out unrecognized PostgreSQL parameters from SQL dump...")
-                        import tempfile
-                        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.sql', delete=False)
-                        temp_filtered_file_path = temp_file.name
-                        temp_file.close()
-                        
-                        # Filter out lines with transaction_timeout
-                        with open(backup_file, 'rb') as infile, open(temp_filtered_file_path, 'wb') as outfile:
-                            for line in infile:
-                                if b'transaction_timeout' not in line.lower():
-                                    outfile.write(line)
-                        
-                        filtered_backup_file = temp_filtered_file_path
-                        self.logger.info(f"Created filtered SQL file: {filtered_backup_file}")
-            except Exception as e:
-                self.logger.warning(f"Could not filter SQL file, using original: {e}")
-                filtered_backup_file = backup_file
+            # Filter out problematic parameters that PostgreSQL doesn't recognize
+            filtered_backup_file, temp_filtered_file_path = self._filter_sql_dump(backup_file)
             
             restore_cmd = [
                 self.psql_path,
@@ -2783,13 +3340,25 @@ def main():
                     print(f"Error: --backup-file must be either a directory or a SQL file: {args.backup_file}")
                     sys.exit(1)
             
+            # Check if this is a cluster dump (when no database is specified)
+            cluster_dump_detected = False
+            if backup_path and not args.database:
+                db_dir = os.path.join(backup_path, 'databases')
+                if os.path.exists(db_dir):
+                    dump_files = [f for f in os.listdir(db_dir) if f.endswith('.sql')]
+                    if 'cluster_dump.sql' in dump_files:
+                        cluster_dump_detected = True
+                        backup_manager.logger.info("Cluster dump detected - will restore entire PostgreSQL cluster")
+                        print("Cluster dump detected - will restore entire PostgreSQL cluster")
+            
             # Detect restore scope: 'all' or 'specific'
-            restore_scope = 'specific' if args.database else 'all'
+            # If cluster dump is detected, always use 'all' to restore entire cluster
+            restore_scope = 'specific' if args.database and not cluster_dump_detected else 'all'
             
             success = backup_manager.restore_session(
                 backup_path=backup_path or "",
                 restore_type=restore_scope,
-                specific_db=args.database,
+                specific_db=args.database if not cluster_dump_detected else None,
                 drop_existing=args.drop_existing,
                 sql_dump_file=sql_dump_file_to_use,
                 ignore_errors=args.ignore_errors

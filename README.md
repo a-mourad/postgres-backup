@@ -46,15 +46,19 @@ sudo ./run.sh --action [backup|restore] [OPTIONS]
 
 ### 🔄 Backup Operations
 
-#### Local Backup (All Databases)
+#### Cluster-Wide Backup (Entire PostgreSQL Cluster)
 ```bash
+# Backup entire PostgreSQL cluster (all databases, roles, tablespaces) + project files
 sudo ./run.sh --action=backup \
     --backup-dir=/tmp/backups \
     --host=localhost \
     --port=5432 \
     --username=postgres \
-    --password=your_password
+    --password=your_password \
+    --project-path=/path/to/project
 ```
+
+> **Note:** When `--database` is not specified, the script uses `pg_dumpall` to backup the entire PostgreSQL cluster, including all databases, roles, and global objects. This is the recommended approach for full cluster backups.
 
 #### Backup Specific Database with Filestore
 ```bash
@@ -103,6 +107,20 @@ sudo ./run.sh --action=backup \
 ```
 
 ### 🔄 Restore Operations
+
+#### Cluster-Wide Restore (Entire PostgreSQL Cluster)
+```bash
+# Restore entire PostgreSQL cluster from cluster dump (no --database specified)
+sudo ./run.sh --action=restore \
+    --backup-dir=/tmp/backups \
+    --host=localhost \
+    --port=5432 \
+    --username=postgres \
+    --password=your_password \
+    --drop-existing
+```
+
+> **Note:** When `--database` is not specified and a `cluster_dump.sql` file is detected, the script automatically restores the entire PostgreSQL cluster, including all databases, roles, and global objects. Use `--drop-existing` to drop existing databases before restore.
 
 #### Database Only Restore
 ```bash
@@ -177,7 +195,7 @@ sudo ./run.sh --action=restore \
 | Argument | Description | Required | Default |
 |----------|-------------|----------|---------|
 | `--action` | Operation to perform: `backup` or `restore` | ✅ | - |
-| `--database` | Database name to backup/restore | ❌ | All databases (backup only) |
+| `--database` | Database name to backup/restore | ❌ | Entire cluster (uses `pg_dumpall`) |
 | `--backup-dir` | Local backup directory | ❌ | `/tmp/db-backups` |
 | `--backup-file` | Specific backup file for restore | ❌ | Latest backup |
 
@@ -218,7 +236,9 @@ sudo ./run.sh --action=restore \
 ## 🏗️ Architecture
 
 ### Backup Process
-1. **Database Dump**: Uses `pg_dump` with optimized settings
+1. **Database Dump**: 
+   - If `--database` is specified: Uses `pg_dump` for individual database backup
+   - If `--database` is NOT specified: Uses `pg_dumpall` for entire cluster backup (best practice)
 2. **Filestore Archive**: Compresses specified folders into tar.gz
 3. **Combined Archive**: Creates final backup archive
 4. **Cloud Upload**: Uploads to configured cloud storage (optional)

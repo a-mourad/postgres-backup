@@ -10,16 +10,29 @@ import json
 import asyncio
 import subprocess
 import shutil
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request, UploadFile, File, Form, Depends, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field, model_validator
+import tarfile
+from dotenv import load_dotenv
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ============================================================================
 # Configuration
@@ -33,6 +46,16 @@ DEFAULT_BACKUP_DIR = os.environ.get("DEFAULT_BACKUP_DIR", "/host/tmp/db-backups"
 # Use local data directory instead of /app
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 CONNECTIONS_FILE = os.environ.get("CONNECTIONS_FILE", "/app/data/connections.json")
+
+# Authentication configuration
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "admin")
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+SESSION_COOKIE_NAME = "pg_backup_session"
+SESSION_MAX_AGE = 86400  # 24 hours
+
+# Session serializer
+session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 # Path translation helpers
 def host_path_to_container(path: str) -> str:
@@ -268,6 +291,51 @@ class TestConnectionRequest(BaseModel):
     password: Optional[str] = None
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
+def create_session_token(username: str) -> str:
+    """Create a session token for the user."""
+    return session_serializer.dumps(username)
+
+
+def verify_session_token(token: str) -> Optional[str]:
+    """Verify and extract username from session token."""
+    try:
+        username = session_serializer.loads(token, max_age=SESSION_MAX_AGE)
+        return username
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+async def get_current_user(request: Request) -> str:
+    """Dependency to get current authenticated user."""
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    
+    if not session_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    username = verify_session_token(session_token)
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return username
+
+
 # ============================================================================
 # WebSocket Connection Manager
 # ============================================================================
@@ -301,8 +369,56 @@ manager = ConnectionManager()
 current_operation = {
     "running": False,
     "process": None,
-    "type": None
+    "type": None,
+    "cancelled": False
 }
+
+
+def kill_process_tree(process):
+    """Kill a process and all its children immediately."""
+    if not process:
+        return
+    
+    try:
+        if PSUTIL_AVAILABLE:
+            # Use psutil to kill process tree
+            try:
+                parent = psutil.Process(process.pid)
+                children = parent.children(recursive=True)
+                # Kill all children first
+                for child in children:
+                    try:
+                        child.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                # Kill parent
+                try:
+                    parent.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Process already dead or no access, try direct kill
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+        else:
+            # Fallback: use process groups (requires preexec_fn=os.setsid when creating process)
+            try:
+                # Try SIGKILL first (immediate kill)
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                # Process group method failed, try direct kill
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+    except Exception as e:
+        # Last resort: try direct kill
+        try:
+            process.kill()
+        except:
+            pass
 
 
 # ============================================================================
@@ -340,7 +456,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     if current_operation["process"]:
-        current_operation["process"].terminate()
+        kill_process_tree(current_operation["process"])
 
 
 app = FastAPI(
@@ -423,16 +539,29 @@ async def run_backup_command(cmd: List[str], operation_type: str):
         
         await log_message(f"Executing: {display_cmd}", "command")
         
-        # Start process
+        # Start process with process group for easier killing
+        # Use preexec_fn to create a new process group
+        def preexec_fn():
+            if hasattr(os, 'setsid'):
+                os.setsid()  # Create new process group
+        
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
+            stderr=asyncio.subprocess.STDOUT,
+            preexec_fn=preexec_fn if hasattr(os, 'setsid') else None
         )
         current_operation["process"] = process
+        current_operation["cancelled"] = False
         
         # Stream output
         while True:
+            # Check if operation was cancelled
+            if current_operation.get("cancelled", False):
+                await log_message("Operation cancelled by user", "warning")
+                kill_process_tree(process)
+                break
+            
             line = await process.stdout.readline()
             if not line:
                 break
@@ -466,6 +595,8 @@ async def run_backup_command(cmd: List[str], operation_type: str):
         
     except asyncio.CancelledError:
         await log_message("Operation cancelled", "warning")
+        if current_operation["process"]:
+            kill_process_tree(current_operation["process"])
         await manager.broadcast({"type": "status", "status": "cancelled"})
         return False
     except Exception as e:
@@ -476,6 +607,7 @@ async def run_backup_command(cmd: List[str], operation_type: str):
         current_operation["running"] = False
         current_operation["process"] = None
         current_operation["type"] = None
+        current_operation["cancelled"] = False
 
 
 def normalize_path(path: str) -> str:
@@ -605,9 +737,207 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
 # API Routes
 # ============================================================================
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    """Serve the login page."""
+    login_html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Login - PG Backup Manager</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+            .login-container {
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                padding: 40px;
+                width: 100%;
+                max-width: 400px;
+            }
+            .login-header {
+                text-align: center;
+                margin-bottom: 30px;
+            }
+            .login-header h1 {
+                color: #333;
+                font-size: 28px;
+                margin-bottom: 8px;
+            }
+            .login-header p {
+                color: #666;
+                font-size: 14px;
+            }
+            .form-group {
+                margin-bottom: 20px;
+            }
+            .form-group label {
+                display: block;
+                color: #333;
+                font-size: 14px;
+                font-weight: 500;
+                margin-bottom: 8px;
+            }
+            .form-group input {
+                width: 100%;
+                padding: 12px;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                font-size: 16px;
+                transition: border-color 0.3s;
+            }
+            .form-group input:focus {
+                outline: none;
+                border-color: #667eea;
+            }
+            .error-message {
+                background: #fee;
+                color: #c33;
+                padding: 12px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                font-size: 14px;
+                display: none;
+            }
+            .error-message.show {
+                display: block;
+            }
+            .login-button {
+                width: 100%;
+                padding: 14px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: transform 0.2s, box-shadow 0.2s;
+            }
+            .login-button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+            }
+            .login-button:active {
+                transform: translateY(0);
+            }
+            .login-button:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="login-container">
+            <div class="login-header">
+                <h1>PG Backup Manager</h1>
+                <p>Please login to continue</p>
+            </div>
+            <div class="error-message" id="errorMessage"></div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit" class="login-button" id="loginButton">Login</button>
+            </form>
+        </div>
+        <script>
+            document.getElementById('loginForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const button = document.getElementById('loginButton');
+                const errorMsg = document.getElementById('errorMessage');
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                
+                button.disabled = true;
+                button.textContent = 'Logging in...';
+                errorMsg.classList.remove('show');
+                
+                try {
+                    const response = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, password })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok && data.success) {
+                        window.location.href = '/';
+                    } else {
+                        errorMsg.textContent = data.detail || 'Invalid username or password';
+                        errorMsg.classList.add('show');
+                        button.disabled = false;
+                        button.textContent = 'Login';
+                    }
+                } catch (error) {
+                    errorMsg.textContent = 'Connection error. Please try again.';
+                    errorMsg.classList.add('show');
+                    button.disabled = false;
+                    button.textContent = 'Login';
+                }
+            });
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(login_html)
+
+
+@app.post("/api/login")
+async def login(request: LoginRequest):
+    """Handle user login."""
+    if request.username == AUTH_USERNAME and request.password == AUTH_PASSWORD:
+        session_token = create_session_token(request.username)
+        response = JSONResponse({"success": True, "message": "Login successful"})
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_token,
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=False  # Set to True in production with HTTPS
+        )
+        return response
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+
+
+@app.post("/api/logout")
+async def logout():
+    """Handle user logout."""
+    response = JSONResponse({"success": True, "message": "Logged out successfully"})
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
-async def root():
+async def root(request: Request):
     """Serve the main application page."""
+    # Check if user is authenticated
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_token or not verify_session_token(session_token):
+        return RedirectResponse(url="/login", status_code=302)
+    
     index_path = static_dir / "index.html"
     if index_path.exists():
         # Read and inject timestamp into HTML for cache-busting
@@ -616,8 +946,8 @@ async def root():
         timestamp = int(time.time())
         # Inject timestamp into CSS and JS URLs (handle both with and without version)
         import re
-        content = re.sub(r'styles\.css(\?v=[^"]*)?', f'styles.css?v=3.0&t={timestamp}', content)
-        content = re.sub(r'app\.js(\?v=[^"]*)?', f'app.js?v=3.0&t={timestamp}', content)
+        content = re.sub(r'styles\.css(\?v=[^"]*)?', f'styles.css?v=3.1&t={timestamp}', content)
+        content = re.sub(r'app\.js(\?v=[^"]*)?', f'app.js?v=3.1&t={timestamp}', content)
         response = HTMLResponse(content)
         # Add aggressive cache-busting headers
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
@@ -630,7 +960,7 @@ async def root():
 
 
 @app.get("/api/status")
-async def get_status():
+async def get_status(user: str = Depends(get_current_user)):
     """Get current operation status."""
     return {
         "running": current_operation["running"],
@@ -639,7 +969,7 @@ async def get_status():
 
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(user: str = Depends(get_current_user)):
     """Get application configuration."""
     return {
         "host_root": HOST_ROOT,
@@ -653,7 +983,7 @@ async def get_config():
 # ============================================================================
 
 @app.get("/api/connections")
-async def get_connections():
+async def get_connections(user: str = Depends(get_current_user)):
     """Get all saved database connections."""
     connections = load_saved_connections()
     # Don't send passwords to frontend for security
@@ -667,7 +997,7 @@ async def get_connections():
 
 
 @app.post("/api/connections")
-async def save_connection(request: SaveConnectionRequest):
+async def save_connection(request: SaveConnectionRequest, user: str = Depends(get_current_user)):
     """Save a new database connection."""
     import uuid
     
@@ -696,7 +1026,7 @@ async def save_connection(request: SaveConnectionRequest):
 
 
 @app.put("/api/connections/{connection_id}")
-async def update_connection(connection_id: str, request: SaveConnectionRequest):
+async def update_connection(connection_id: str, request: SaveConnectionRequest, user: str = Depends(get_current_user)):
     """Update an existing database connection."""
     connections = load_saved_connections()
     
@@ -724,7 +1054,7 @@ async def update_connection(connection_id: str, request: SaveConnectionRequest):
 
 
 @app.delete("/api/connections/{connection_id}")
-async def delete_connection(connection_id: str):
+async def delete_connection(connection_id: str, user: str = Depends(get_current_user)):
     """Delete a saved database connection."""
     connections = load_saved_connections()
     
@@ -739,7 +1069,7 @@ async def delete_connection(connection_id: str):
 
 
 @app.get("/api/connections/{connection_id}")
-async def get_connection(connection_id: str, include_password: bool = False):
+async def get_connection(connection_id: str, include_password: bool = False, user: str = Depends(get_current_user)):
     """Get a specific connection by ID."""
     connections = load_saved_connections()
     
@@ -755,7 +1085,7 @@ async def get_connection(connection_id: str, include_password: bool = False):
 
 
 @app.post("/api/connections/{connection_id}/test")
-async def test_saved_connection(connection_id: str):
+async def test_saved_connection(connection_id: str, user: str = Depends(get_current_user)):
     """Test a saved database connection."""
     connections = load_saved_connections()
     
@@ -778,7 +1108,7 @@ async def test_saved_connection(connection_id: str):
 # ============================================================================
 
 @app.post("/api/test-connection")
-async def test_connection(request: TestConnectionRequest):
+async def test_connection(request: TestConnectionRequest, user: str = Depends(get_current_user)):
     """Test database connection."""
     try:
         # Find any available psql first
@@ -839,7 +1169,7 @@ async def test_connection(request: TestConnectionRequest):
 
 
 @app.post("/api/list-databases")
-async def list_databases(request: TestConnectionRequest):
+async def list_databases(request: TestConnectionRequest, user: str = Depends(get_current_user)):
     """List all available databases."""
     try:
         # Find compatible psql tool
@@ -878,7 +1208,7 @@ async def list_databases(request: TestConnectionRequest):
 
 
 @app.post("/api/backup")
-async def start_backup(request: BackupRequest, background_tasks: BackgroundTasks):
+async def start_backup(request: BackupRequest, background_tasks: BackgroundTasks, user: str = Depends(get_current_user)):
     """Start a backup operation."""
     if current_operation["running"]:
         raise HTTPException(status_code=409, detail="An operation is already running")
@@ -890,7 +1220,7 @@ async def start_backup(request: BackupRequest, background_tasks: BackgroundTasks
 
 
 @app.post("/api/restore")
-async def start_restore(http_request: Request, background_tasks: BackgroundTasks = BackgroundTasks()):
+async def start_restore(http_request: Request, background_tasks: BackgroundTasks = BackgroundTasks(), user: str = Depends(get_current_user)):
     """Start a restore operation."""
     if current_operation["running"]:
         raise HTTPException(status_code=409, detail="An operation is already running")
@@ -932,6 +1262,7 @@ async def start_restore(http_request: Request, background_tasks: BackgroundTasks
         target_project_path=request_data.get("target_project_path"),
         skip_database=request_data.get("skip_database", False),
         post_restore_commands=request_data.get("post_restore_commands"),
+        ignore_errors=request_data.get("ignore_errors", False),
         connection=connection_obj,
         database=request_data.get("database")
     )
@@ -955,11 +1286,28 @@ async def start_restore(http_request: Request, background_tasks: BackgroundTasks
 
 
 @app.post("/api/stop")
-async def stop_operation():
-    """Stop the current operation."""
+async def stop_operation(user: str = Depends(get_current_user)):
+    """Stop the current operation immediately by killing the process and all children."""
     if current_operation["process"]:
-        current_operation["process"].terminate()
-        return {"status": "stopping"}
+        # Mark as cancelled
+        current_operation["cancelled"] = True
+        
+        # Immediately kill the process and all its children
+        kill_process_tree(current_operation["process"])
+        
+        # Wait a moment to ensure process is killed
+        await asyncio.sleep(0.1)
+        
+        # Clean up
+        current_operation["running"] = False
+        current_operation["process"] = None
+        current_operation["type"] = None
+        
+        # Notify clients
+        await manager.broadcast({"type": "status", "status": "cancelled"})
+        await log_message("Operation stopped by user", "warning")
+        
+        return {"status": "stopped"}
     return {"status": "no_operation"}
 
 
@@ -968,7 +1316,7 @@ async def stop_operation():
 # ============================================================================
 
 @app.get("/api/files/browse")
-async def browse_files(path: str = "", search: Optional[str] = None):
+async def browse_files(path: str = "", search: Optional[str] = None, user: str = Depends(get_current_user)):
     """
     Browse files and directories.
     Restricts view to /host/host_mnt if it exists, acting as the root.
@@ -1083,7 +1431,7 @@ async def browse_files(path: str = "", search: Optional[str] = None):
 
 
 @app.post("/api/files/create-folder")
-async def create_folder(request: Request):
+async def create_folder(request: Request, user: str = Depends(get_current_user)):
     """Create a new folder in the specified path."""
     try:
         # Parse JSON body
@@ -1139,7 +1487,7 @@ async def create_folder(request: Request):
 
 
 @app.get("/api/files/backups")
-async def list_backups(backup_dir: str = "/tmp/db-backups"):
+async def list_backups(backup_dir: str = "/tmp/db-backups", user: str = Depends(get_current_user)):
     """List available backups (Sessions)."""
     try:
         # Normalize the path to container path
@@ -1165,7 +1513,8 @@ async def list_backups(backup_dir: str = "/tmp/db-backups"):
                                 "path": item_path,
                                 "created": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
                                 "databases": [],
-                                "has_files": False
+                                "has_files": False,
+                                "file_sizes": {}
                             }
                             
                             # Check for databases inside
@@ -1174,13 +1523,20 @@ async def list_backups(backup_dir: str = "/tmp/db-backups"):
                                 try:
                                     for db_file in os.listdir(db_dir):
                                         if db_file.endswith('.sql'):
-                                            session_info["databases"].append(db_file[:-4]) # remove .sql
+                                            db_name = db_file[:-4]  # remove .sql
+                                            session_info["databases"].append(db_name)
+                                            # Get file size
+                                            db_file_path = os.path.join(db_dir, db_file)
+                                            if os.path.exists(db_file_path):
+                                                session_info["file_sizes"][db_file] = os.path.getsize(db_file_path)
                                 except (PermissionError, OSError):
                                     pass
                             
                             # Check for files archive
-                            if os.path.exists(os.path.join(item_path, 'files.tar.gz')):
+                            files_archive = os.path.join(item_path, 'files.tar.gz')
+                            if os.path.exists(files_archive):
                                 session_info["has_files"] = True
+                                session_info["file_sizes"]["files.tar.gz"] = os.path.getsize(files_archive)
                                 
                             if session_info["databases"] or session_info["has_files"]:
                                 backups.append(session_info)
@@ -1199,8 +1555,189 @@ async def list_backups(backup_dir: str = "/tmp/db-backups"):
         return {"success": False, "error": str(e), "backups": []}
 
 
+@app.post("/api/upload-sql")
+async def upload_sql_file(
+    file: UploadFile = File(...),
+    backup_dir: str = Form("/tmp/db-backups"),
+    user: str = Depends(get_current_user)
+):
+    """
+    Upload a SQL file for restore operations.
+    The file will be saved in the backup directory for use in restore operations.
+    """
+    try:
+        # Validate file extension
+        if not file.filename.endswith(('.sql', '.dump')):
+            raise HTTPException(status_code=400, detail="File must be a .sql or .dump file")
+        
+        # Normalize backup directory path
+        actual_backup_dir = normalize_path(backup_dir)
+        os.makedirs(actual_backup_dir, exist_ok=True)
+        
+        # Create uploads subdirectory
+        uploads_dir = os.path.join(actual_backup_dir, "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        # Save file with timestamp to avoid conflicts
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_filename = f"{timestamp}_{file.filename}"
+        file_path = os.path.join(uploads_dir, safe_filename)
+        
+        # Write file
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        file_size = os.path.getsize(file_path)
+        
+        return {
+            "success": True,
+            "message": "File uploaded successfully",
+            "filename": safe_filename,
+            "original_filename": file.filename,
+            "path": file_path,
+            "size": file_size,
+            "uploaded_at": datetime.now().isoformat()
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
+
+@app.get("/api/download-backup")
+async def download_backup(
+    session_id: str,
+    file_type: str,  # "database", "files", or "all"
+    database_name: str = None,
+    backup_dir: str = "/tmp/db-backups",
+    user: str = Depends(get_current_user)
+):
+    """
+    Download backup files.
+    
+    Args:
+        session_id: The backup session ID (timestamp folder name)
+        file_type: Type of file to download - "database", "files", or "all"
+        database_name: Name of database file (required if file_type is "database")
+        backup_dir: Backup directory path
+    """
+    try:
+        # Normalize paths
+        actual_backup_dir = normalize_path(backup_dir)
+        session_path = os.path.join(actual_backup_dir, session_id)
+        
+        if not os.path.exists(session_path):
+            raise HTTPException(status_code=404, detail=f"Backup session not found: {session_id}")
+        
+        if file_type == "database":
+            if not database_name:
+                raise HTTPException(status_code=400, detail="database_name is required for database downloads")
+            
+            db_dir = os.path.join(session_path, "databases")
+            db_file = os.path.join(db_dir, f"{database_name}.sql")
+            
+            if not os.path.exists(db_file):
+                raise HTTPException(status_code=404, detail=f"Database file not found: {database_name}.sql")
+            
+            return FileResponse(
+                db_file,
+                media_type="application/sql",
+                filename=f"{database_name}_{session_id}.sql"
+            )
+        
+        elif file_type == "files":
+            files_archive = os.path.join(session_path, "files.tar.gz")
+            
+            if not os.path.exists(files_archive):
+                raise HTTPException(status_code=404, detail="Files archive not found in this backup")
+            
+            return FileResponse(
+                files_archive,
+                media_type="application/gzip",
+                filename=f"files_{session_id}.tar.gz"
+            )
+        
+        elif file_type == "all":
+            # Create a tar archive of the entire session
+            import tempfile
+            
+            temp_archive = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
+            temp_archive.close()
+            
+            try:
+                with tarfile.open(temp_archive.name, "w:gz") as tar:
+                    tar.add(session_path, arcname=session_id)
+                
+                # Use StreamingResponse for large files and cleanup
+                def generate():
+                    try:
+                        with open(temp_archive.name, 'rb') as f:
+                            while True:
+                                chunk = f.read(8192)
+                                if not chunk:
+                                    break
+                                yield chunk
+                    finally:
+                        # Cleanup after streaming
+                        try:
+                            os.unlink(temp_archive.name)
+                        except:
+                            pass
+                
+                return StreamingResponse(
+                    generate(),
+                    media_type="application/gzip",
+                    headers={"Content-Disposition": f'attachment; filename="backup_{session_id}.tar.gz"'}
+                )
+            except Exception as e:
+                if os.path.exists(temp_archive.name):
+                    os.unlink(temp_archive.name)
+                raise HTTPException(status_code=500, detail=f"Error creating archive: {str(e)}")
+        
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file_type. Must be 'database', 'files', or 'all'")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading backup: {str(e)}")
+
+
+@app.get("/api/list-uploaded-sql")
+async def list_uploaded_sql(backup_dir: str = "/tmp/db-backups", user: str = Depends(get_current_user)):
+    """List all uploaded SQL files."""
+    try:
+        actual_backup_dir = normalize_path(backup_dir)
+        uploads_dir = os.path.join(actual_backup_dir, "uploads")
+        
+        if not os.path.exists(uploads_dir):
+            return {"success": True, "files": []}
+        
+        files = []
+        for filename in os.listdir(uploads_dir):
+            if filename.endswith(('.sql', '.dump')):
+                file_path = os.path.join(uploads_dir, filename)
+                stat_info = os.stat(file_path)
+                files.append({
+                    "filename": filename,
+                    "path": file_path,
+                    "size": stat_info.st_size,
+                    "created": datetime.fromtimestamp(stat_info.st_mtime).isoformat()
+                })
+        
+        # Sort by creation time desc
+        files.sort(key=lambda x: x["created"], reverse=True)
+        
+        return {"success": True, "files": files}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e), "files": []}
+
+
 @app.get("/api/disk-usage")
-async def get_disk_usage():
+async def get_disk_usage(user: str = Depends(get_current_user)):
     """Get disk usage information."""
     try:
         usage = shutil.disk_usage(HOST_ROOT)

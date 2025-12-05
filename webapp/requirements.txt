@@ -3,6 +3,7 @@
 # Web Framework
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
 
 # WebSocket support (included with uvicorn[standard])
 websockets>=12.0
@@ -17,4 +18,13 @@ psycopg2-binary>=2.9.0
 boto3>=1.28.0
 minio>=7.1.0
 google-cloud-storage>=2.10.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Authentication
+itsdangerous>=2.1.0
+
+# Process management
+psutil>=5.9.0
 

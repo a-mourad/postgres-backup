@@ -16,8 +16,6 @@
 # Access the web interface at: http://localhost:6536
 # ============================================================================
 
-version: '3.8'
-
 services:
   pg-backup-manager:
     build:
@@ -87,6 +85,10 @@ services:
     # Uncomment this if host.docker.internal doesn't work
     # network_mode: host
     
+    # Networks
+    networks:
+      - proxiable
+    
     # Run with elevated privileges for full filesystem access
     # WARNING: Only enable in trusted environments
     privileged: true
@@ -121,5 +123,6 @@ volumes:
 
 networks:
   default:
-    name: backup-network
     driver: bridge
+  proxiable:
+    external: true

@@ -59,7 +59,7 @@ function handleWebSocketMessage(data) {
             appendLog(data.timestamp, data.message, data.level);
             break;
         case 'status':
-            updateStatus(data.status, data.operation);
+            updateStatus(data.status, data.operation, data.success);
             break;
         case 'pong':
             // Connection alive
@@ -116,7 +116,7 @@ function downloadLogs() {
 // Status Management
 // ============================================================================
 
-function updateStatus(status, operation = null) {
+function updateStatus(status, operation = null, success = null) {
     const indicator = document.getElementById('statusIndicator');
     const dot = indicator.querySelector('.status-dot');
     const text = indicator.querySelector('.status-text');
@@ -135,11 +135,24 @@ function updateStatus(status, operation = null) {
             stopBtn.disabled = false;
             break;
         case 'completed':
-            dot.classList.add('success');
-            text.textContent = 'Completed';
-            state.isRunning = false;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
+            // Check if operation was successful
+            if (success === false) {
+                // Operation failed
+                dot.classList.add('error');
+                text.textContent = 'Failed';
+                state.isRunning = false;
+                stopBtn.disabled = true;
+                // Update button state - this will enable/disable based on form validation
+                updateStartButtonState();
+            } else {
+                // Operation succeeded
+                dot.classList.add('success');
+                text.textContent = 'Completed';
+                state.isRunning = false;
+                stopBtn.disabled = true;
+                // Update button state - this will enable/disable based on form validation
+                updateStartButtonState();
+            }
             setTimeout(() => {
                 if (!state.isRunning) {
                     dot.className = 'status-dot idle';
@@ -152,8 +165,9 @@ function updateStatus(status, operation = null) {
             dot.classList.add('error');
             text.textContent = status === 'error' ? 'Error' : 'Cancelled';
             state.isRunning = false;
-            startBtn.disabled = false;
             stopBtn.disabled = true;
+            // Update button state - this will enable/disable based on form validation
+            updateStartButtonState();
             setTimeout(() => {
                 if (!state.isRunning) {
                     dot.className = 'status-dot idle';
@@ -165,10 +179,49 @@ function updateStatus(status, operation = null) {
             dot.classList.add('idle');
             text.textContent = 'Idle';
             state.isRunning = false;
-            startBtn.disabled = false;
             stopBtn.disabled = true;
+            // Update button state - this will enable/disable based on form validation
+            updateStartButtonState();
     }
 }
+
+// ============================================================================
+// Authentication
+// ============================================================================
+
+async function checkAuth() {
+    try {
+        const response = await fetch('/api/status');
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return false;
+        }
+        return true;
+    } catch (error) {
+        console.error('Auth check failed:', error);
+        return false;
+    }
+}
+
+async function logout() {
+    try {
+        await fetch('/api/logout', { method: 'POST' });
+        window.location.href = '/login';
+    } catch (error) {
+        console.error('Logout failed:', error);
+        window.location.href = '/login';
+    }
+}
+
+// Intercept fetch calls to handle 401 errors
+const originalFetch = window.fetch;
+window.fetch = async function(...args) {
+    const response = await originalFetch(...args);
+    if (response.status === 401 && !args[0].includes('/api/login')) {
+        window.location.href = '/login';
+    }
+    return response;
+};
 
 // ============================================================================
 // API Calls
@@ -261,6 +314,30 @@ function selectDatabase(db) {
     document.getElementById('dbDropdown').classList.remove('show');
 }
 
+function validateBackupForm() {
+    const tab = state.currentTab;
+    if (tab !== 'backup') return true;
+    
+    // For backup, we need at least:
+    // - A connection (host, username) OR
+    // - A project path (for project backup)
+    const projectPath = document.getElementById('projectPath')?.value.trim();
+    const host = document.getElementById('dbHost')?.value.trim();
+    const username = document.getElementById('dbUsername')?.value.trim();
+    
+    // If project path is provided, that's sufficient for backup
+    if (projectPath) {
+        return true;
+    }
+    
+    // Otherwise, we need at least host and username for database connection
+    if (host && username) {
+        return true;
+    }
+    
+    return false;
+}
+
 function validateRestoreForm() {
     const tab = state.currentTab;
     if (tab !== 'restore') return true;
@@ -295,8 +372,14 @@ function updateStartButtonState() {
         return;
     }
     
-    // Enable button if form is valid
-    const isValid = validateRestoreForm();
+    // Validate based on current tab
+    let isValid = true;
+    if (state.currentTab === 'backup') {
+        isValid = validateBackupForm();
+    } else if (state.currentTab === 'restore') {
+        isValid = validateRestoreForm();
+    }
+    
     startBtn.disabled = !isValid;
 }
 
@@ -722,14 +805,27 @@ async function loadBackups() {
                                     <polyline points="14,2 14,8 20,8"/>
                                 </svg>
                                 <span class="backup-item-name">Project Files</span>
+                                ${session.file_sizes && session.file_sizes['files.tar.gz'] ? 
+                                    `<span style="font-size: 0.8em; opacity: 0.7; margin-left: 8px;">${formatBytes(session.file_sizes['files.tar.gz'])}</span>` : ''}
                             </div>
                             <div class="backup-item-actions">
+                                <button class="btn btn-sm btn-icon" onclick="downloadBackup('${session.session_id}', 'files', null, '${backupDir}')" title="Download files archive">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7,10 12,15 17,10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                </button>
                                 <span class="badge">Included</span>
                             </div>
                         </div>
                     ` : ''}
                     
-                    ${session.databases.map(db => `
+                    ${session.databases.map(db => {
+                        const dbFile = `${db}.sql`;
+                        const fileSize = session.file_sizes && session.file_sizes[dbFile] ? 
+                            formatBytes(session.file_sizes[dbFile]) : '';
+                        return `
                         <div class="backup-item">
                             <div class="backup-item-info">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px;">
@@ -738,16 +834,32 @@ async function loadBackups() {
                                     <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
                                 </svg>
                                 <span class="backup-item-name">${db}</span>
+                                ${fileSize ? `<span style="font-size: 0.8em; opacity: 0.7; margin-left: 8px;">${fileSize}</span>` : ''}
                             </div>
                             <div class="backup-item-actions">
+                                <button class="btn btn-sm btn-icon" onclick="downloadBackup('${session.session_id}', 'database', '${db}', '${backupDir}')" title="Download database dump">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7,10 12,15 17,10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                </button>
                                 <button class="btn btn-sm" onclick="useBackupForRestore('${session.path}', '${db}', 'specific')">
                                     Restore DB
                                 </button>
                             </div>
                         </div>
-                    `).join('')}
+                    `}).join('')}
                     
-                    <div class="backup-group-footer" style="padding: 10px; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end;">
+                    <div class="backup-group-footer" style="padding: 10px; border-top: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
+                        <button class="btn btn-sm btn-icon" onclick="downloadBackup('${session.session_id}', 'all', null, '${backupDir}')" title="Download entire backup session">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7,10 12,15 17,10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            Download All
+                        </button>
                         <button class="btn btn-sm btn-primary" onclick="useBackupForRestore('${session.path}', null, 'all')">
                             Restore Session (All)
                         </button>
@@ -1297,6 +1409,23 @@ function switchTab(tabName) {
         content.classList.toggle('active', content.id === `tab-${tabName}`);
     });
     
+    // Show/hide connection section based on tab
+    const connectionSection = document.getElementById('connectionSection');
+    if (connectionSection) {
+        if (tabName === 'backup') {
+            // Always show connection section on backup tab
+            connectionSection.removeAttribute('hidden');
+            connectionSection.classList.remove('hidden');
+        } else if (tabName === 'restore') {
+            // Connection section visibility is managed by switchRestoreType
+            // Don't change it here, let switchRestoreType handle it
+        } else {
+            // For other tabs, show connection section
+            connectionSection.removeAttribute('hidden');
+            connectionSection.classList.remove('hidden');
+        }
+    }
+    
     // Update start button text
     const startBtn = document.getElementById('startBtn');
     if (tabName === 'backup') {
@@ -1314,6 +1443,9 @@ function switchTab(tabName) {
             Start Restore
         `;
     }
+    
+    // Update button state when switching tabs
+    updateStartButtonState();
     
     // Load data for specific tabs
     if (tabName === 'files') {
@@ -1412,7 +1544,13 @@ function formatDate(isoString) {
 // Event Listeners
 // ============================================================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    // Check authentication first
+    const isAuthenticated = await checkAuth();
+    if (!isAuthenticated) {
+        return;
+    }
+    
     // Load theme
     loadTheme();
     
@@ -1439,6 +1577,25 @@ document.addEventListener('DOMContentLoaded', () => {
             toggleRestoreInputs();
             updateStartButtonState();
         });
+    }
+    
+    // Add event listeners to backup form inputs to update button state
+    const projectPathInput = document.getElementById('projectPath');
+    if (projectPathInput) {
+        projectPathInput.addEventListener('input', updateStartButtonState);
+        projectPathInput.addEventListener('change', updateStartButtonState);
+    }
+    
+    const dbHostInput = document.getElementById('dbHost');
+    if (dbHostInput) {
+        dbHostInput.addEventListener('input', updateStartButtonState);
+        dbHostInput.addEventListener('change', updateStartButtonState);
+    }
+    
+    const dbUsernameInput = document.getElementById('dbUsername');
+    if (dbUsernameInput) {
+        dbUsernameInput.addEventListener('input', updateStartButtonState);
+        dbUsernameInput.addEventListener('change', updateStartButtonState);
     }
     
     // Add event listeners to restore form inputs to update button state
@@ -1624,5 +1781,191 @@ document.addEventListener('DOMContentLoaded', () => {
             state.ws.send('ping');
         }
     }, 30000);
+    
+    // Load uploaded SQL files when restore tab is opened
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            if (tab.dataset.tab === 'restore') {
+                loadUploadedSqlFiles();
+            }
+        });
+    });
+    
+    // Initial load of uploaded SQL files
+    loadUploadedSqlFiles();
 });
+
+// ============================================================================
+// SQL File Upload
+// ============================================================================
+
+function openSqlUploadDialog() {
+    document.getElementById('sqlUploadModal').classList.add('show');
+    document.getElementById('sqlFileInput').value = '';
+    document.getElementById('sqlUploadStatus').style.display = 'none';
+    document.getElementById('sqlUploadConfirmBtn').disabled = true;
+}
+
+function closeSqlUploadModal() {
+    document.getElementById('sqlUploadModal').classList.remove('show');
+}
+
+function handleSqlFileSelect() {
+    const fileInput = document.getElementById('sqlFileInput');
+    const uploadBtn = document.getElementById('sqlUploadConfirmBtn');
+    const status = document.getElementById('sqlUploadStatus');
+    
+    if (fileInput.files && fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        if (file.name.endsWith('.sql') || file.name.endsWith('.dump')) {
+            uploadBtn.disabled = false;
+            status.style.display = 'none';
+        } else {
+            uploadBtn.disabled = true;
+            status.style.display = 'block';
+            status.className = 'upload-status error';
+            status.textContent = 'Please select a .sql or .dump file';
+        }
+    } else {
+        uploadBtn.disabled = true;
+    }
+}
+
+async function uploadSqlFile() {
+    const fileInput = document.getElementById('sqlFileInput');
+    const backupDir = document.getElementById('sqlUploadBackupDir').value || '/tmp/db-backups';
+    const status = document.getElementById('sqlUploadStatus');
+    const uploadBtn = document.getElementById('sqlUploadConfirmBtn');
+    
+    if (!fileInput.files || fileInput.files.length === 0) {
+        status.style.display = 'block';
+        status.className = 'upload-status error';
+        status.textContent = 'Please select a file';
+        return;
+    }
+    
+    const file = fileInput.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('backup_dir', backupDir);
+    
+    uploadBtn.disabled = true;
+    status.style.display = 'block';
+    status.className = 'upload-status info';
+    status.textContent = 'Uploading...';
+    
+    try {
+        const response = await fetch('/api/upload-sql', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            status.className = 'upload-status success';
+            status.textContent = `File uploaded successfully: ${data.filename}`;
+            
+            // Update the SQL dump file input
+            document.getElementById('restoreSqlDumpFile').value = data.path;
+            toggleRestoreInputs();
+            
+            // Reload uploaded files list
+            await loadUploadedSqlFiles();
+            
+            // Close modal after a short delay
+            setTimeout(() => {
+                closeSqlUploadModal();
+                showToast('SQL file uploaded successfully', 'success');
+            }, 1500);
+        } else {
+            status.className = 'upload-status error';
+            status.textContent = data.error || 'Upload failed';
+            uploadBtn.disabled = false;
+        }
+    } catch (error) {
+        status.className = 'upload-status error';
+        status.textContent = `Upload error: ${error.message}`;
+        uploadBtn.disabled = false;
+    }
+}
+
+async function loadUploadedSqlFiles() {
+    const backupDir = document.getElementById('restoreBackupDir')?.value || '/tmp/db-backups';
+    const select = document.getElementById('uploadedSqlFiles');
+    const group = document.getElementById('uploadedSqlFilesGroup');
+    
+    if (!select || !group) return;
+    
+    try {
+        const response = await fetch(`/api/list-uploaded-sql?backup_dir=${encodeURIComponent(backupDir)}`);
+        const data = await response.json();
+        
+        if (data.success && data.files && data.files.length > 0) {
+            select.innerHTML = '<option value="">Select an uploaded SQL file...</option>' +
+                data.files.map(file => 
+                    `<option value="${file.path}" data-size="${file.size}">${file.filename} (${formatBytes(file.size)})</option>`
+                ).join('');
+            group.style.display = 'block';
+        } else {
+            group.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('Error loading uploaded SQL files:', error);
+        group.style.display = 'none';
+    }
+}
+
+function selectUploadedSqlFile() {
+    const select = document.getElementById('uploadedSqlFiles');
+    const sqlDumpInput = document.getElementById('restoreSqlDumpFile');
+    
+    if (select && select.value && sqlDumpInput) {
+        sqlDumpInput.value = select.value;
+        toggleRestoreInputs();
+        updateStartButtonState();
+    }
+}
+
+// ============================================================================
+// Backup Download
+// ============================================================================
+
+async function downloadBackup(sessionId, fileType, databaseName, backupDir) {
+    try {
+        const params = new URLSearchParams({
+            session_id: sessionId,
+            file_type: fileType,
+            backup_dir: backupDir || '/tmp/db-backups'
+        });
+        
+        if (databaseName) {
+            params.append('database_name', databaseName);
+        }
+        
+        const url = `/api/download-backup?${params.toString()}`;
+        
+        // Create a temporary link and click it to trigger download
+        const link = document.createElement('a');
+        link.href = url;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        showToast('Download started', 'success');
+    } catch (error) {
+        showToast(`Download error: ${error.message}`, 'error');
+    }
+}
+
+// Make functions globally available
+window.openSqlUploadDialog = openSqlUploadDialog;
+window.closeSqlUploadModal = closeSqlUploadModal;
+window.handleSqlFileSelect = handleSqlFileSelect;
+window.uploadSqlFile = uploadSqlFile;
+window.loadUploadedSqlFiles = loadUploadedSqlFiles;
+window.selectUploadedSqlFile = selectUploadedSqlFile;
+window.downloadBackup = downloadBackup;
+window.logout = logout;
 
