@@ -1536,6 +1536,11 @@ function formatFileSize(bytes) {
     return `${bytes.toFixed(1)} ${units[i]}`;
 }
 
+// Alias for formatFileSize (used in backup list)
+function formatBytes(bytes) {
+    return formatFileSize(bytes);
+}
+
 function formatDate(isoString) {
     return new Date(isoString).toLocaleString();
 }
