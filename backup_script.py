@@ -25,6 +25,7 @@ import shutil
 import shlex
 import tarfile
 import time
+import re
 from datetime import datetime
 from typing import List, Optional, Dict, Union
 
@@ -644,7 +645,8 @@ class DatabaseBackupManager:
             specific_db: Optional[str] = None,
             drop_existing: bool = True,
             sql_dump_file: Optional[str] = None,
-            ignore_errors: bool = False
+            ignore_errors: bool = False,
+            filter_sql: bool = False
     ) -> bool:
         """
         Restore from a session backup folder.
@@ -696,131 +698,257 @@ class DatabaseBackupManager:
                 if not os.path.isfile(sql_dump_file):
                     raise ValueError(f"SQL dump path is not a file: {sql_dump_file}")
                 
-                # Extract database name from filename or use provided specific_db
-                if specific_db:
-                    db_name = specific_db
-                else:
-                    # Try to extract from filename (e.g., /path/to/database.sql -> database)
-                    db_name = os.path.basename(sql_dump_file)
-                    if db_name.endswith('.sql'):
-                        db_name = db_name[:-4]
-                    else:
-                        raise ValueError(f"Cannot determine database name from SQL dump file: {sql_dump_file}. Please specify --database")
+                # Check if this is a cluster dump
+                is_cluster_dump = self._is_cluster_dump(sql_dump_file)
                 
-                self.logger.info(f"Restoring database '{db_name}' from SQL dump file: {sql_dump_file}")
-                
-                # Create/Drop DB logic
-                if drop_existing:
-                    self._drop_and_create_db(db_name)
-                    # Verify database is clean before restore
-                    self._verify_database_empty(db_name)
-                
-                # Filter out problematic parameters from SQL dump
-                filtered_sql_file, temp_file_to_cleanup = self._filter_sql_dump(sql_dump_file)
-                
-                try:
-                    # Restore dump
-                    # Use ON_ERROR_STOP to make psql exit on errors (not just warnings) - unless ignore_errors is set
-                    # Use --single-transaction for atomic restore (all or nothing) - only when not ignoring errors
-                    restore_cmd = [
-                        self.psql_path,
-                        f'-h{self.host}',
-                        f'-p{self.port}',
-                        f'-U{self.username}',
-                        '-d', db_name,
-                    ]
+                if is_cluster_dump:
+                    # Handle cluster dump restore
+                    self.logger.info("Detected cluster dump - restoring entire PostgreSQL cluster")
                     
-                    if ignore_errors:
-                        # Don't use single-transaction when ignoring errors - allows partial restore
-                        self.logger.info("Running restore with --ignore-errors: errors will be logged but won't stop the restore")
-                    else:
-                        restore_cmd.extend(['--single-transaction', '-v', 'ON_ERROR_STOP=1'])
+                    if specific_db:
+                        self.logger.warning("Cluster dump detected but specific database requested. Cluster dump restores all databases.")
+                        self.logger.warning("Ignoring --database parameter and restoring entire cluster.")
                     
-                    restore_cmd.extend(['-f', filtered_sql_file])
+                    # If drop_existing is True, drop all existing databases (except system databases)
+                    if drop_existing:
+                        self.logger.info("Dropping existing databases before cluster restore...")
+                        self._drop_all_databases()
                     
-                    # Log the command (hide password in connection string)
-                    cmd_display = ' '.join(restore_cmd)
-                    if ignore_errors:
-                        self.logger.info(f"Executing restore command: {cmd_display} (errors will be ignored)")
-                    else:
-                        self.logger.info(f"Executing restore command: {cmd_display}")
-                    result = subprocess.run(
-                        restore_cmd,
-                        env={**os.environ, 'PGPASSWORD': self.password},
-                        check=False,  # Don't raise exception, we'll handle it
-                        capture_output=True,
-                        text=True
-                    )
+                    # ALWAYS filter cluster dumps to avoid DROP/CREATE USER errors for current user
+                    # Cluster dumps contain role management commands that will fail if the current user
+                    # is being dropped/created. This is a common scenario when restoring to the same server.
+                    if not filter_sql:
+                        self.logger.info("Auto-enabling SQL filtering for cluster dump (prevents DROP/CREATE USER errors)")
+                    filtered_sql_file, temp_file_to_cleanup = self._filter_sql_dump(sql_dump_file)
                     
-                    # Parse stderr for errors vs warnings
-                    error_count = 0
-                    warning_count = 0
-                    critical_errors = []
-                    
-                    if result.stderr:
-                        stderr_lines = result.stderr.split('\n')
-                        for line in stderr_lines:
-                            if 'ERROR:' in line.upper():
-                                error_count += 1
-                                critical_errors.append(line.strip())
-                            elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
-                                warning_count += 1
-                    
-                    # Log detailed error information
-                    if error_count > 0:
-                        log_level = self.logger.warning if ignore_errors else self.logger.error
-                        log_level(f"Restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
+                    try:
+                        # Restore cluster dump to postgres database (or without -d flag)
+                        # pg_dumpall output includes CREATE DATABASE statements, so we connect to postgres
+                        restore_cmd = [
+                            self.psql_path,
+                            f'-h{self.host}',
+                            f'-p{self.port}',
+                            f'-U{self.username}',
+                            '-d', 'postgres',  # Connect to postgres database for cluster restore
+                        ]
+                        
                         if ignore_errors:
-                            self.logger.warning("Errors were ignored due to --ignore-errors flag")
-                        log_level("Errors found:")
-                        for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
-                            log_level(f"  {i}. {error}")
-                        if len(critical_errors) > 20:
-                            log_level(f"  ... and {len(critical_errors) - 20} more errors")
-                    
-                    if result.returncode != 0:
-                        if ignore_errors:
-                            self.logger.warning(f"Restore command returned code {result.returncode} but continuing due to --ignore-errors")
-                            if result.stderr:
-                                self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
+                            # Don't use single-transaction when ignoring errors - allows partial restore
+                            self.logger.info("Running cluster restore with --ignore-errors: errors will be logged but won't stop the restore")
                         else:
-                            self.logger.error(f"Restore command failed with return code {result.returncode}")
-                            self.logger.error(f"STDERR: {result.stderr}")
-                            self.logger.error(f"STDOUT: {result.stdout}")
-                            raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
-                    
-                    # Even if return code is 0, check for critical errors
-                    if error_count > 0 and not ignore_errors:
-                        self.logger.warning(f"Restore completed with exit code 0 but {error_count} ERROR(s) detected")
-                        self.logger.warning("This may indicate partial restore or data integrity issues")
-                        # Log full stderr for debugging
+                            # Note: --single-transaction cannot be used with cluster dumps
+                            # as they contain DROP DATABASE and CREATE DATABASE statements
+                            # Use ON_ERROR_STOP instead
+                            restore_cmd.extend(['-v', 'ON_ERROR_STOP=1'])
+                        
+                        restore_cmd.extend(['-f', filtered_sql_file])
+                        
+                        # Log the command (hide password in connection string)
+                        cmd_display = ' '.join(restore_cmd)
+                        if ignore_errors:
+                            self.logger.info(f"Executing cluster restore command: {cmd_display} (errors will be ignored)")
+                        else:
+                            self.logger.info(f"Executing cluster restore command: {cmd_display}")
+                        
+                        result = subprocess.run(
+                            restore_cmd,
+                            env={**os.environ, 'PGPASSWORD': self.password},
+                            check=False,  # Don't raise exception, we'll handle it
+                            capture_output=True,
+                            text=True
+                        )
+                        
+                        # Parse stderr for errors vs warnings
+                        error_count = 0
+                        warning_count = 0
+                        critical_errors = []
+                        
                         if result.stderr:
-                            self.logger.warning(f"Full error output: {result.stderr}")
-                    elif result.stderr and warning_count > 0:
-                        # Only warnings, no errors
-                        self.logger.warning(f"Restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
-                    
-                    self.logger.info(f"Restored database: {db_name}")
-                    
-                    # Verify the restore was successful
-                    self.logger.info(f"Verifying restore for database '{db_name}'...")
-                    if self._verify_database_restore(db_name):
-                        self.logger.info(f"✓ Restore verification successful for database '{db_name}'")
-                        print(f"✓ Restore verification successful for database '{db_name}'")
+                            stderr_lines = result.stderr.split('\n')
+                            for line in stderr_lines:
+                                if 'ERROR:' in line.upper():
+                                    error_count += 1
+                                    critical_errors.append(line.strip())
+                                elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
+                                    warning_count += 1
+                        
+                        # Log detailed error information
+                        if error_count > 0:
+                            log_level = self.logger.warning if ignore_errors else self.logger.error
+                            log_level(f"Cluster restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
+                            if ignore_errors:
+                                self.logger.warning("Errors were ignored due to --ignore-errors flag")
+                            log_level("Errors found:")
+                            for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
+                                log_level(f"  {i}. {error}")
+                            if len(critical_errors) > 20:
+                                log_level(f"  ... and {len(critical_errors) - 20} more errors")
+                        
+                        if result.returncode != 0:
+                            if ignore_errors:
+                                self.logger.warning(f"Cluster restore command returned code {result.returncode} but continuing due to --ignore-errors")
+                                if result.stderr:
+                                    self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
+                            else:
+                                self.logger.error(f"Cluster restore command failed with return code {result.returncode}")
+                                self.logger.error(f"STDERR: {result.stderr}")
+                                self.logger.error(f"STDOUT: {result.stdout}")
+                                raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
+                        
+                        # Even if return code is 0, check for critical errors
+                        if error_count > 0 and not ignore_errors:
+                            self.logger.warning(f"Cluster restore completed with exit code 0 but {error_count} ERROR(s) detected")
+                            self.logger.warning("This may indicate partial restore or data integrity issues")
+                            # Log full stderr for debugging
+                            if result.stderr:
+                                self.logger.warning(f"Full error output: {result.stderr}")
+                        elif result.stderr and warning_count > 0:
+                            # Only warnings, no errors
+                            self.logger.warning(f"Cluster restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
+                        
+                        self.logger.info("Cluster restore completed successfully")
+                        print("✓ Cluster restore completed successfully")
+                        
+                        return True
+                    finally:
+                        # Clean up temp filtered file if created
+                        if temp_file_to_cleanup:
+                            try:
+                                os.remove(temp_file_to_cleanup)
+                                self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
+                            except Exception as e:
+                                self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
+                else:
+                    # Single database restore
+                    # Extract database name from filename or use provided specific_db
+                    if specific_db:
+                        db_name = specific_db
                     else:
-                        self.logger.error(f"✗ Restore verification failed for database '{db_name}'")
-                        print(f"✗ WARNING: Restore verification failed for database '{db_name}'. Please check the database manually.")
-                        # Don't return False here - the restore command succeeded, verification is just a check
+                        # Try to extract from filename (e.g., /path/to/database.sql -> database)
+                        db_name = os.path.basename(sql_dump_file)
+                        if db_name.endswith('.sql'):
+                            db_name = db_name[:-4]
+                        else:
+                            raise ValueError(f"Cannot determine database name from SQL dump file: {sql_dump_file}. Please specify --database")
                     
-                    return True
-                finally:
-                    # Clean up temp filtered file if created
-                    if temp_file_to_cleanup:
-                        try:
-                            os.remove(temp_file_to_cleanup)
-                            self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
-                        except Exception as e:
-                            self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
+                    self.logger.info(f"Restoring database '{db_name}' from SQL dump file: {sql_dump_file}")
+                    
+                    # Create/Drop DB logic
+                    if drop_existing:
+                        self._drop_and_create_db(db_name)
+                        # Verify database is clean before restore
+                        self._verify_database_empty(db_name)
+                    
+                    # Filter out problematic parameters from SQL dump (if enabled)
+                    if filter_sql:
+                        filtered_sql_file, temp_file_to_cleanup = self._filter_sql_dump(sql_dump_file)
+                    else:
+                        filtered_sql_file = sql_dump_file
+                        temp_file_to_cleanup = None
+                    
+                    try:
+                        # Restore dump
+                        # Use ON_ERROR_STOP to make psql exit on errors (not just warnings) - unless ignore_errors is set
+                        # Use --single-transaction for atomic restore (all or nothing) - only when not ignoring errors
+                        restore_cmd = [
+                            self.psql_path,
+                            f'-h{self.host}',
+                            f'-p{self.port}',
+                            f'-U{self.username}',
+                            '-d', db_name,
+                        ]
+                        
+                        if ignore_errors:
+                            # Don't use single-transaction when ignoring errors - allows partial restore
+                            self.logger.info("Running restore with --ignore-errors: errors will be logged but won't stop the restore")
+                        else:
+                            restore_cmd.extend(['--single-transaction', '-v', 'ON_ERROR_STOP=1'])
+                        
+                        restore_cmd.extend(['-f', filtered_sql_file])
+                        
+                        # Log the command (hide password in connection string)
+                        cmd_display = ' '.join(restore_cmd)
+                        if ignore_errors:
+                            self.logger.info(f"Executing restore command: {cmd_display} (errors will be ignored)")
+                        else:
+                            self.logger.info(f"Executing restore command: {cmd_display}")
+                        result = subprocess.run(
+                            restore_cmd,
+                            env={**os.environ, 'PGPASSWORD': self.password},
+                            check=False,  # Don't raise exception, we'll handle it
+                            capture_output=True,
+                            text=True
+                        )
+                        
+                        # Parse stderr for errors vs warnings
+                        error_count = 0
+                        warning_count = 0
+                        critical_errors = []
+                        
+                        if result.stderr:
+                            stderr_lines = result.stderr.split('\n')
+                            for line in stderr_lines:
+                                if 'ERROR:' in line.upper():
+                                    error_count += 1
+                                    critical_errors.append(line.strip())
+                                elif 'WARNING:' in line.upper() or 'error: invalid command' in line.lower():
+                                    warning_count += 1
+                        
+                        # Log detailed error information
+                        if error_count > 0:
+                            log_level = self.logger.warning if ignore_errors else self.logger.error
+                            log_level(f"Restore completed with {error_count} ERROR(s) and {warning_count} warning(s)")
+                            if ignore_errors:
+                                self.logger.warning("Errors were ignored due to --ignore-errors flag")
+                            log_level("Errors found:")
+                            for i, error in enumerate(critical_errors[:20], 1):  # Show first 20 errors
+                                log_level(f"  {i}. {error}")
+                            if len(critical_errors) > 20:
+                                log_level(f"  ... and {len(critical_errors) - 20} more errors")
+                        
+                        if result.returncode != 0:
+                            if ignore_errors:
+                                self.logger.warning(f"Restore command returned code {result.returncode} but continuing due to --ignore-errors")
+                                if result.stderr:
+                                    self.logger.warning(f"STDERR (first 2000 chars): {result.stderr[:2000]}")
+                            else:
+                                self.logger.error(f"Restore command failed with return code {result.returncode}")
+                                self.logger.error(f"STDERR: {result.stderr}")
+                                self.logger.error(f"STDOUT: {result.stdout}")
+                                raise subprocess.CalledProcessError(result.returncode, restore_cmd, result.stdout, result.stderr)
+                        
+                        # Even if return code is 0, check for critical errors
+                        if error_count > 0 and not ignore_errors:
+                            self.logger.warning(f"Restore completed with exit code 0 but {error_count} ERROR(s) detected")
+                            self.logger.warning("This may indicate partial restore or data integrity issues")
+                            # Log full stderr for debugging
+                            if result.stderr:
+                                self.logger.warning(f"Full error output: {result.stderr}")
+                        elif result.stderr and warning_count > 0:
+                            # Only warnings, no errors
+                            self.logger.warning(f"Restore warnings ({warning_count}): {result.stderr[:2000]}")  # Limit output
+                        
+                        self.logger.info(f"Restored database: {db_name}")
+                        
+                        # Verify the restore was successful
+                        self.logger.info(f"Verifying restore for database '{db_name}'...")
+                        if self._verify_database_restore(db_name):
+                            self.logger.info(f"✓ Restore verification successful for database '{db_name}'")
+                            print(f"✓ Restore verification successful for database '{db_name}'")
+                        else:
+                            self.logger.error(f"✗ Restore verification failed for database '{db_name}'")
+                            print(f"✗ WARNING: Restore verification failed for database '{db_name}'. Please check the database manually.")
+                            # Don't return False here - the restore command succeeded, verification is just a check
+                        
+                        return True
+                    finally:
+                        # Clean up temp filtered file if created
+                        if temp_file_to_cleanup:
+                            try:
+                                os.remove(temp_file_to_cleanup)
+                                self.logger.debug(f"Cleaned up temp filtered SQL file: {temp_file_to_cleanup}")
+                            except Exception as e:
+                                self.logger.warning(f"Could not clean up temp file {temp_file_to_cleanup}: {e}")
             
             # Only validate backup_path if sql_dump_file is not provided
             if not sql_dump_file and (not backup_path or not os.path.exists(backup_path)):
@@ -862,7 +990,11 @@ class DatabaseBackupManager:
                     self.logger.info(f"  Using cluster dump file: {full_dump_path}")
                     self.logger.info(f"  Dump file exists: {os.path.exists(full_dump_path)}")
                     
-                    # Filter out problematic parameters from SQL dump
+                    # ALWAYS filter cluster dumps to avoid DROP/CREATE USER errors for current user
+                    # Cluster dumps contain role management commands that will fail if the current user
+                    # is being dropped/created. This is a common scenario when restoring to the same server.
+                    if not filter_sql:
+                        self.logger.info("Auto-enabling SQL filtering for cluster dump (prevents DROP/CREATE USER errors)")
                     filtered_dump_path, temp_file_to_cleanup = self._filter_sql_dump(full_dump_path)
                     
                     try:
@@ -980,8 +1112,12 @@ class DatabaseBackupManager:
                             # Verify database is clean before restore
                             self._verify_database_empty(db_name)
                         
-                        # Filter out problematic parameters from SQL dump
-                        filtered_dump_path, temp_file_to_cleanup = self._filter_sql_dump(full_dump_path)
+                        # Filter out problematic parameters from SQL dump (if enabled)
+                        if filter_sql:
+                            filtered_dump_path, temp_file_to_cleanup = self._filter_sql_dump(full_dump_path)
+                        else:
+                            filtered_dump_path = full_dump_path
+                            temp_file_to_cleanup = None
                         
                         try:
                             # Restore dump
@@ -1521,13 +1657,71 @@ class DatabaseBackupManager:
         
         return fixed_any
 
+    def _is_cluster_dump(self, sql_file: str) -> bool:
+        """
+        Detect if a SQL file is a cluster dump (pg_dumpall output).
+        
+        Cluster dumps contain:
+        - DROP DATABASE statements
+        - CREATE DATABASE statements
+        - Multiple database definitions
+        
+        Args:
+            sql_file: Path to the SQL dump file
+            
+        Returns:
+            bool: True if file appears to be a cluster dump
+        """
+        try:
+            # Check filename first (fast check)
+            filename = os.path.basename(sql_file).lower()
+            if 'cluster_dump' in filename or filename == 'cluster_dump.sql':
+                return True
+            
+            # Check file content for cluster dump indicators
+            with open(sql_file, 'rb') as f:
+                # Read first 64KB to check for cluster dump indicators
+                first_chunk = f.read(65536).decode('utf-8', errors='ignore').lower()
+                
+                # Cluster dumps typically contain:
+                # - DROP DATABASE statements
+                # - CREATE DATABASE statements (multiple)
+                # - pg_dumpall comments
+                cluster_indicators = [
+                    'drop database',
+                    'create database',
+                    'pg_dumpall',
+                    '-- dump of database',
+                ]
+                
+                # Count occurrences of cluster dump indicators
+                indicator_count = sum(1 for indicator in cluster_indicators if indicator in first_chunk)
+                
+                # If we find multiple indicators, it's likely a cluster dump
+                if indicator_count >= 2:
+                    return True
+                
+                # Also check for multiple CREATE DATABASE statements (strong indicator)
+                if first_chunk.count('create database') > 1:
+                    return True
+                    
+            return False
+        except Exception as e:
+            self.logger.warning(f"Could not check if file is cluster dump: {e}")
+            # If we can't determine, assume it's not a cluster dump (safer for single DB restore)
+            return False
+
     def _filter_sql_dump(self, sql_file: str) -> tuple:
         """
-        Filter out problematic parameters from SQL dump files.
+        Filter out problematic parameters and commands from SQL dump files.
         
-        Some PostgreSQL parameters (like transaction_timeout) are version-specific
-        or from custom builds (Odoo). This filters them out to allow restore on
-        standard PostgreSQL installations.
+        Filters out:
+        1. PostgreSQL parameters (like transaction_timeout) that are version-specific
+           or from custom builds (Odoo)
+        2. DROP USER/ROLE commands targeting the current user (PostgreSQL doesn't allow
+           a user to drop itself)
+        3. CREATE USER/ROLE commands targeting the current user (user already exists
+           and is being used for the restore)
         
         Args:
             sql_file: Path to the SQL dump file
@@ -1543,16 +1737,36 @@ class DatabaseBackupManager:
             b'idle_session_timeout',  # Another common Odoo/custom parameter
         ]
         
+        # Get current username for filtering DROP USER/ROLE commands
+        current_username = self.username.encode('utf-8') if self.username else None
+        
         try:
             # Quick check if file needs filtering
+            needs_filtering = False
             with open(sql_file, 'rb') as f:
                 # Read first 16KB to check for problematic parameters
                 first_chunk = f.read(16384)
                 needs_filtering = any(param in first_chunk.lower() for param in problematic_params)
                 
+                # Also check for DROP/CREATE USER/ROLE commands targeting current user
+                if not needs_filtering and current_username:
+                    first_chunk_lower = first_chunk.lower()
+                    # Escape username as string first, then encode to bytes
+                    username_escaped = re.escape(current_username.decode('utf-8').lower()).encode('utf-8')
+                    # Pattern: DROP (USER|ROLE) [IF EXISTS] username
+                    drop_pattern = rb'drop\s+(?:user|role)\s+(?:if\s+exists\s+)?["\']?' + username_escaped + rb'["\']?'
+                    # Pattern: CREATE (USER|ROLE) username [WITH ...] [;]
+                    create_pattern = rb'create\s+(?:user|role)\s+["\']?' + username_escaped + rb'["\']?(?:\s+with|\s*;|\s|$)'
+                    if re.search(drop_pattern, first_chunk_lower, re.IGNORECASE) or \
+                       re.search(create_pattern, first_chunk_lower, re.IGNORECASE):
+                        needs_filtering = True
+                
                 if not needs_filtering:
                     # Also check a bit further in case SET statements are after initial comments
                     f.seek(0)
+                    username_escaped = None
+                    if current_username:
+                        username_escaped = re.escape(current_username.decode('utf-8').lower()).encode('utf-8')
                     for i, line in enumerate(f):
                         if i > 50:  # Check first 50 lines
                             break
@@ -1560,32 +1774,81 @@ class DatabaseBackupManager:
                         if any(param in line_lower for param in problematic_params):
                             needs_filtering = True
                             break
+                        # Check for DROP/CREATE USER/ROLE in first lines
+                        if current_username and not needs_filtering and username_escaped:
+                            drop_pattern = rb'drop\s+(?:user|role)\s+(?:if\s+exists\s+)?["\']?' + username_escaped + rb'["\']?'
+                            create_pattern = rb'create\s+(?:user|role)\s+["\']?' + username_escaped + rb'["\']?'
+                            if re.search(drop_pattern, line_lower, re.IGNORECASE) or \
+                               re.search(create_pattern, line_lower, re.IGNORECASE):
+                                needs_filtering = True
+                                break
             
             if not needs_filtering:
                 return (sql_file, None)
             
-            self.logger.info("Filtering out unrecognized PostgreSQL parameters from SQL dump...")
+            self.logger.info("Filtering out problematic statements from SQL dump...")
             
             import tempfile
             temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.sql', delete=False)
             temp_file_path = temp_file.name
             
             filtered_count = 0
+            drop_user_filtered = 0
+            create_user_filtered = 0
+            
+            # Pre-compute escaped username pattern for efficiency
+            username_escaped_for_filter = None
+            drop_pattern = None
+            create_pattern = None
+            if current_username:
+                username_escaped_for_filter = re.escape(current_username.decode('utf-8').lower()).encode('utf-8')
+                # Pattern: DROP (USER|ROLE) [IF EXISTS] username [;]
+                # Match both quoted and unquoted usernames, with optional semicolon
+                drop_pattern = rb'drop\s+(?:user|role)\s+(?:if\s+exists\s+)?["\']?' + username_escaped_for_filter + rb'["\']?\s*;?'
+                # Pattern: CREATE (USER|ROLE) username [WITH ...] [;]
+                # Match both quoted and unquoted usernames, followed by optional WITH clause, semicolon, or whitespace/end
+                # This handles both single-line and multi-line CREATE commands
+                create_pattern = rb'create\s+(?:user|role)\s+["\']?' + username_escaped_for_filter + rb'["\']?(?:\s+with|\s*;|\s|$)'
+            
             with open(sql_file, 'rb') as infile:
                 for line in infile:
                     line_lower = line.lower()
+                    should_filter = False
+                    
                     # Check if line contains any problematic parameter
-                    should_filter = any(param in line_lower for param in problematic_params)
+                    if any(param in line_lower for param in problematic_params):
+                        should_filter = True
+                        filtered_count += 1
+                    
+                    # Check for DROP USER/ROLE commands targeting current user
+                    if drop_pattern and not should_filter:
+                        if re.search(drop_pattern, line_lower, re.IGNORECASE):
+                            should_filter = True
+                            drop_user_filtered += 1
+                            self.logger.info(f"Filtering out DROP USER/ROLE command for current user '{self.username}'")
+                    
+                    # Check for CREATE USER/ROLE commands targeting current user
+                    if create_pattern and not should_filter:
+                        # CREATE USER/ROLE commands can span multiple lines, but typically start with CREATE
+                        # We need to match the username that appears after CREATE USER/ROLE
+                        if re.search(create_pattern, line_lower, re.IGNORECASE):
+                            should_filter = True
+                            create_user_filtered += 1
+                            self.logger.info(f"Filtering out CREATE USER/ROLE command for current user '{self.username}'")
                     
                     if should_filter:
-                        filtered_count += 1
                         # Write as comment instead of removing completely
                         temp_file.write(b'-- FILTERED: ' + line)
                     else:
                         temp_file.write(line)
             
             temp_file.close()
-            self.logger.info(f"Filtered {filtered_count} line(s) with problematic parameters")
+            if filtered_count > 0:
+                self.logger.info(f"Filtered {filtered_count} line(s) with problematic parameters")
+            if drop_user_filtered > 0:
+                self.logger.info(f"Filtered {drop_user_filtered} DROP USER/ROLE command(s) for current user")
+            if create_user_filtered > 0:
+                self.logger.info(f"Filtered {create_user_filtered} CREATE USER/ROLE command(s) for current user")
             
             return (temp_file_path, temp_file_path)
             
@@ -2228,7 +2491,9 @@ class DatabaseBackupManager:
             # Restore database
             self.logger.info(f"Starting database restore from: {backup_file}")
             
-            # Filter out problematic parameters that PostgreSQL doesn't recognize
+            # Filter out problematic parameters that PostgreSQL doesn't recognize (if enabled)
+            # Note: This method doesn't have filter_sql parameter, so we default to False for backward compatibility
+            # This method is used by restore_project which may not need filtering
             filtered_backup_file, temp_filtered_file_path = self._filter_sql_dump(backup_file)
             
             restore_cmd = [
@@ -2797,6 +3062,9 @@ def main():
     parser.add_argument('--drop-existing', action='store_true', help='Drop existing database before restore')
     parser.add_argument('--ignore-errors', action='store_true', 
                         help='Continue restore even if errors occur (useful for dumps with duplicate constraints)')
+    
+    parser.add_argument('--filter-sql', action='store_true',
+                        help='Filter problematic SQL statements (DROP/CREATE USER for current user, etc.). Disabled by default.')
 
     # Storage arguments
     parser.add_argument('--storage-type',
@@ -3236,7 +3504,8 @@ def main():
                     specific_db=args.database,
                     drop_existing=args.drop_existing,
                     sql_dump_file=args.sql_dump_file,
-                    ignore_errors=args.ignore_errors
+                    ignore_errors=args.ignore_errors,
+                    filter_sql=getattr(args, 'filter_sql', False)
                 )
                 # Exit early since we've already restored from the SQL dump file
                 sys.exit(0 if success else 1)
@@ -3361,7 +3630,8 @@ def main():
                 specific_db=args.database if not cluster_dump_detected else None,
                 drop_existing=args.drop_existing,
                 sql_dump_file=sql_dump_file_to_use,
-                ignore_errors=args.ignore_errors
+                ignore_errors=args.ignore_errors,
+                filter_sql=getattr(args, 'filter_sql', False)
             )
             
             # Restore files if needed (for database restore, files are optional)

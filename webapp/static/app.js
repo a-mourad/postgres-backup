@@ -453,12 +453,13 @@ async function startOperation() {
             endpoint = '/api/restore';
             payload = {
                 connection: getConnectionConfig(),
-                database: database,
+                database: database || null,  // Send null if empty for cluster dumps
                 backup_dir: document.getElementById('restoreBackupDir').value || '/tmp/db-backups',
                 backup_file: document.getElementById('restoreBackupFile').value || null,
                 sql_dump_file: sqlDumpFile,
                 drop_existing: document.getElementById('dropExisting').checked,
                 ignore_errors: document.getElementById('ignoreErrors').checked,
+                filter_sql: document.getElementById('filterSql').checked,
                 restore_type: 'database'
             };
         } else {
@@ -980,22 +981,53 @@ function toggleRestoreInputs() {
     const sqlDumpFile = document.getElementById('restoreSqlDumpFile');
     const backupDirGroup = document.getElementById('restoreBackupDirGroup');
     const backupFileGroup = document.getElementById('restoreBackupFileGroup');
+    const databaseRequired = document.getElementById('restoreDatabaseRequired');
+    const databaseHint = document.getElementById('restoreDatabaseHint');
     
     if (!sqlDumpFile || !backupDirGroup || !backupFileGroup) {
         return;
     }
     
     const hasSqlFile = sqlDumpFile.value.trim().length > 0;
+    const isClusterDump = hasSqlFile && (
+        sqlDumpFile.value.toLowerCase().includes('cluster_dump') ||
+        sqlDumpFile.value.toLowerCase().endsWith('cluster_dump.sql')
+    );
     
     if (hasSqlFile) {
         // Hide backup directory and backup file inputs
         backupDirGroup.style.display = 'none';
         backupFileGroup.style.display = 'none';
+        
+        // Update database name field hint and required indicator
+        if (isClusterDump) {
+            if (databaseRequired) databaseRequired.style.display = 'none';
+            if (databaseHint) {
+                databaseHint.textContent = 'Cluster dump detected - database name is optional. Leave empty to restore entire cluster.';
+                databaseHint.style.color = 'var(--success-color, #00D4AA)';
+            }
+        } else {
+            if (databaseRequired) databaseRequired.style.display = 'inline';
+            if (databaseHint) {
+                databaseHint.textContent = 'Database name is optional when SQL dump file is provided. Will be extracted from filename if not specified.';
+                databaseHint.style.color = '';
+            }
+        }
     } else {
         // Show backup directory and backup file inputs
         backupDirGroup.style.display = 'block';
         backupFileGroup.style.display = 'block';
+        
+        // Reset database name field
+        if (databaseRequired) databaseRequired.style.display = 'inline';
+        if (databaseHint) {
+            databaseHint.textContent = 'The name of the database to restore. Leave empty if restoring a cluster dump (cluster_dump.sql).';
+            databaseHint.style.color = '';
+        }
     }
+    
+    // Update button state after toggling
+    updateStartButtonState();
 }
 
 function selectFromModal() {

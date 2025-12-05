@@ -282,6 +282,7 @@ class RestoreRequest(BaseModel):
     skip_database: bool = False
     post_restore_commands: Optional[List[str]] = None
     ignore_errors: bool = False  # Continue restore even if errors occur (e.g. duplicate constraints)
+    filter_sql: bool = False  # Filter problematic SQL statements (DROP/CREATE USER for current user, etc.)
 
 
 class TestConnectionRequest(BaseModel):
@@ -697,8 +698,9 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
         if request.connection.password:
             cmd.extend(["--password", request.connection.password])
     
-    # Database - optional, if None will restore all databases
-    if request.database:
+    # Database - optional, if None will restore all databases (or cluster dump)
+    # Only add database parameter if it's provided and not empty
+    if request.database and request.database.strip():
         cmd.extend(["--database", request.database])
     
     # Normalize backup directory path
@@ -719,6 +721,9 @@ def build_restore_command(request: RestoreRequest) -> List[str]:
     
     if request.ignore_errors:
         cmd.append("--ignore-errors")
+    
+    if request.filter_sql:
+        cmd.append("--filter-sql")
     
     if request.restore_type == "project":
         # Project restore
@@ -1267,7 +1272,8 @@ async def start_restore(http_request: Request, background_tasks: BackgroundTasks
         database=request_data.get("database")
     )
     
-    # Database name required only for database-only restore (unless sql_dump_file is provided)
+    # Database name is optional if sql_dump_file is provided (will auto-detect cluster dump)
+    # Database name required only for database-only restore without sql_dump_file
     if request.restore_type == "database" and not request.database and not request.sql_dump_file:
         raise HTTPException(status_code=400, detail="Database name is required for database-only restore (or provide sql_dump_file)")
     
